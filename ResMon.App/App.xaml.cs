@@ -86,8 +86,11 @@ public partial class App : Application
     {
         if (_detail is null)
         {
-            _detail = new DetailWindow();
-            _detail.Closed += (_, _) =>
+            var detail = new DetailWindow();
+            _detail = detail;
+
+            detail.KillRequested += (pid, name) => ProcessTerminator.RequestKill(detail, pid, name);
+            detail.Closed += (_, _) =>
             {
                 _detail = null;
                 // Prozess-Enumeration ist der teuerste Teil der Erfassung und
@@ -102,13 +105,12 @@ public partial class App : Application
 
                 // Beim ersten Öffnen läuft die WMI-Abfrage womöglich noch; das
                 // Fenster holt sie sich nach, sobald sie fertig ist.
-                DetailWindow target = _detail;
                 _ = _collector.SystemInfoReady.ContinueWith(
-                    task => Dispatcher.BeginInvoke(() => target.PushSystemInfo(task.Result)),
+                    task => Dispatcher.BeginInvoke(() => detail.PushSystemInfo(task.Result)),
                     TaskContinuationOptions.OnlyOnRanToCompletion);
             }
 
-            _detail.Show();
+            detail.Show();
             return;
         }
 

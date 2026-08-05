@@ -1,4 +1,5 @@
 using System.Windows;
+using Microsoft.Web.WebView2.Core;
 using ResMon.App.Bridge;
 using ResMon.Core.Inventory;
 using ResMon.Core.Model;
@@ -15,7 +16,7 @@ public partial class DetailWindow : Window
 {
     private bool _webReady;
     private IReadOnlyList<ProcessSample>? _lastSentProcesses;
-    private SystemInfo? _pendingSystemInfo;
+    private SystemInfo? _systemInfo;
 
     public DetailWindow()
     {
@@ -23,18 +24,21 @@ public partial class DetailWindow : Window
         Loaded += OnLoaded;
     }
 
+    /// <summary>Wird ausgelöst, wenn die Oberfläche das Beenden eines Prozesses anfordert.</summary>
+    public event Action<int, string?>? KillRequested;
+
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         try
         {
+            Web.WebMessageReceived += OnWebMessageReceived;
             await WebViewHost.InitializeAsync(Web, "detail.html", transparent: false);
             _webReady = true;
 
-            if (_pendingSystemInfo is { } pending)
-            {
-                _pendingSystemInfo = null;
+            // Die Systemübersicht kann schon eingetroffen sein, während die Seite
+            // noch lud.
+            if (_systemInfo is { } pending)
                 PushSystemInfo(pending);
-            }
         }
         catch (Exception ex)
         {
@@ -67,13 +71,27 @@ public partial class DetailWindow : Window
     /// </summary>
     public void PushSystemInfo(SystemInfo info)
     {
+        // Merken, damit sie nach der Initialisierung nachgereicht werden kann.
+        _systemInfo = info;
         if (!_webReady)
-        {
-            // Noch nicht bereit: nach der Initialisierung nachholen.
-            _pendingSystemInfo = info;
             return;
-        }
 
         Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildSystemPayload(info));
+    }
+
+    private void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        WebCommand? command = WebBridge.ParseCommand(e.WebMessageAsJson);
+        switch (command?.Cmd)
+        {
+            case "killProcess" when command.Pid is { } pid:
+                KillRequested?.Invoke(pid, command.Name);
+                break;
+            case "requestSystemInfo" when _systemInfo is { } info:
+                // Die Übersicht wird nur einmal gesendet; die Oberfläche fragt
+                // nach, falls sie sie nicht bekommen hat.
+                Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildSystemPayload(info));
+                break;
+        }
     }
 }

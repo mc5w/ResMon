@@ -55,6 +55,31 @@ internal static class WebViewHost
         settings.IsGeneralAutofillEnabled = false;
         settings.IsPasswordAutosaveEnabled = false;
 
-        core.Navigate(PageUri(page).ToString());
+        await NavigateAndWaitAsync(core, PageUri(page).ToString());
+    }
+
+    /// <summary>
+    /// Navigiert und wartet, bis das Dokument steht. Ohne dieses Warten gehen
+    /// Nachrichten verloren, die genau einmal gesendet werden — die Seite
+    /// existiert zum Zeitpunkt von <c>Navigate</c> noch nicht.
+    /// </summary>
+    private static async Task NavigateAndWaitAsync(CoreWebView2 core, string url)
+    {
+        var completed = new TaskCompletionSource();
+
+        void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
+        {
+            core.NavigationCompleted -= OnNavigationCompleted;
+            completed.TrySetResult();
+        }
+
+        core.NavigationCompleted += OnNavigationCompleted;
+        core.Navigate(url);
+
+        // Ein Zeitlimit, damit eine fehlgeschlagene Navigation das Fenster nicht
+        // dauerhaft blockiert.
+        Task finished = await Task.WhenAny(completed.Task, Task.Delay(TimeSpan.FromSeconds(15)));
+        if (finished != completed.Task)
+            core.NavigationCompleted -= OnNavigationCompleted;
     }
 }

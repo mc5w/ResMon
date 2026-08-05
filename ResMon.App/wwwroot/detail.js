@@ -144,11 +144,15 @@ const state = {
     sortKey: 'cpu',
     sortAsc: false,
     filter: '',
-    aggregate: false,
-    onlyActive: false,
+    // Standardmäßig zusammengefasst und auf aktive Prozesse beschränkt — so ist
+    // die Liste beim Öffnen kurz genug, um etwas darauf zu erkennen.
+    aggregate: true,
+    onlyActive: true,
     pinned: new Set(),
+    expanded: new Set(),
     editing: null,
     view: 'processes',
+    systemLoaded: false,
 };
 
 function loadJson(key, fallback) {
@@ -203,6 +207,7 @@ const elements = {
     columnsMenu: document.getElementById('columns-menu'),
     systemGroups: document.getElementById('system-groups'),
     systemDrives: document.getElementById('system-drives'),
+    systemEmpty: document.getElementById('system-empty'),
 };
 
 // ---------- Kacheln ----------
@@ -420,10 +425,13 @@ function drawChart() {
 function aggregateTree(processes) {
     const byPid = new Map(processes.map(p => [p.pid, p]));
 
+    // Liefert den obersten Vorfahren samt Abstand zu ihm, für die Einrückung
+    // beim Aufklappen.
     const rootOf = process => {
         let current = process;
+        let depth = 0;
         // Tiefenbegrenzung als Schutz vor recycelten PIDs, die einen Zyklus bilden.
-        for (let depth = 0; depth < 32; depth++) {
+        while (depth < 32) {
             const parent = current.parentPid === null || current.parentPid === undefined
                 ? undefined
                 : byPid.get(current.parentPid);
@@ -431,21 +439,26 @@ function aggregateTree(processes) {
                 break;
             }
             current = parent;
+            depth++;
         }
-        return current;
+        return { root: current, depth };
     };
 
     const groups = new Map();
     for (const process of processes) {
-        const root = rootOf(process);
+        const { root, depth } = rootOf(process);
         let group = groups.get(root.pid);
         if (!group) {
             group = {
                 pid: root.pid, parentPid: null, name: root.name, description: root.description,
                 path: root.path, cpu: 0, ws: 0, priv: 0, gpu: 0, gpuEngines: {}, gpuMem: 0,
-                rx: 0, tx: 0, ioRead: 0, ioWrite: 0, services: [], children: 0,
+                rx: 0, tx: 0, ioRead: 0, ioWrite: 0, services: [], children: 0, members: [],
             };
             groups.set(root.pid, group);
+        }
+
+        if (process.pid !== root.pid) {
+            group.members.push({ ...process, depth });
         }
 
         group.cpu += process.cpu;
@@ -550,7 +563,7 @@ function renderHead() {
         th.textContent = column.label;
         th.dataset.sort = column.key;
         th.className = column.align === 'right' ? 'num' : '';
-        th.title = `${column.help}\n\nKlick sortiert nach dieser Spalte.`;
+        th.title = column.help;
         if (state.sortKey === column.key) {
             th.classList.add(state.sortAsc ? 'sorted-asc' : 'sorted-desc');
         }
@@ -579,15 +592,15 @@ function loadClass(value) {
 }
 
 /**
- * Baut oder aktualisiert die Zeile eines Prozesses. Bestehende Zeilen werden
+ * Baut oder aktualisiert eine Tabellenzeile. Bestehende Zeilen werden
  * wiederverwendet und nur dort beschrieben, wo sich der Text geändert hat —
  * sonst flackert die Tabelle bei jedem Takt.
  */
-function rowElement(row, columns) {
-    let entry = rowCache.get(row.pid);
+function rowElement(item, columns) {
+    const row = item.row;
+    let entry = rowCache.get(item.key);
     if (!entry || entry.columns !== columns.length) {
         const tr = document.createElement('tr');
-        tr.dataset.pid = row.pid;
         const cells = new Map();
         for (const column of columns) {
             const td = document.createElement('td');
@@ -596,10 +609,13 @@ function rowElement(row, columns) {
             cells.set(column.key, td);
         }
         entry = { tr, cells, columns: columns.length };
-        rowCache.set(row.pid, entry);
+        rowCache.set(item.key, entry);
     }
 
-    entry.tr.classList.toggle('pinned', state.pinned.has(row.pid));
+    entry.tr.dataset.pid = row.pid;
+    entry.tr.dataset.child = item.child ? '1' : '';
+    entry.tr.classList.toggle('pinned', !item.child && state.pinned.has(row.pid));
+    entry.tr.classList.toggle('child-row', Boolean(item.child));
 
     for (const column of columns) {
         const td = entry.cells.get(column.key);
@@ -620,7 +636,7 @@ function rowElement(row, columns) {
         }
 
         if (column.key === 'name') {
-            renderNameCell(td, row);
+            renderNameCell(td, item);
         } else if (column.key === 'note') {
             renderNoteCell(td, row);
         } else {
@@ -635,9 +651,11 @@ function rowElement(row, columns) {
     return entry.tr;
 }
 
-function renderNameCell(td, row) {
-    const badge = row.children ? `+${row.children}` : '';
-    const signature = `${row.name}|${badge}|${row.description || ''}`;
+function renderNameCell(td, item) {
+    const row = item.row;
+    const expandable = Boolean(item.group && row.children);
+    const expanded = expandable && state.expanded.has(row.pid);
+    const signature = `${row.name}|${row.children || 0}|${row.description || ''}|${expanded}|${item.depth}|${item.own || false}`;
     if (td.dataset.signature === signature) {
         return;
     }
@@ -645,15 +663,38 @@ function renderNameCell(td, row) {
 
     const wrap = document.createElement('div');
     wrap.className = 'name-cell';
+    wrap.style.paddingLeft = item.depth ? `${item.depth * 16}px` : '';
+
+    if (expandable) {
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'expander';
+        toggle.dataset.expand = row.pid;
+        toggle.textContent = expanded ? '▾' : '▸';
+        toggle.title = expanded
+            ? 'Kindprozesse wieder einklappen'
+            : `${row.children} Kindprozesse einzeln anzeigen`;
+        wrap.append(toggle);
+    } else if (item.group) {
+        const spacer = document.createElement('span');
+        spacer.className = 'expander-spacer';
+        wrap.append(spacer);
+    }
 
     const strong = document.createElement('span');
     strong.textContent = row.name;
     wrap.append(strong);
 
-    if (badge) {
+    if (item.own) {
+        const own = document.createElement('span');
+        own.className = 'children';
+        own.textContent = 'nur dieser Prozess';
+        own.title = 'Der Elternprozess ohne die aufsummierten Werte seiner Kindprozesse.';
+        wrap.append(own);
+    } else if (expandable) {
         const children = document.createElement('span');
         children.className = 'children';
-        children.textContent = badge;
+        children.textContent = `+${row.children}`;
         children.title = `${row.children} Kindprozesse zusammengefasst`;
         wrap.append(children);
     }
@@ -703,19 +744,24 @@ function renderTable() {
 
     const { pinned, rest, total } = visibleRows();
     const columns = activeColumns();
-    const shown = [...pinned, ...rest.slice(0, 400)];
+    const groups = [...pinned, ...rest.slice(0, 400)];
+
+    const items = [];
+    for (const group of groups) {
+        items.push(...expandGroup(group));
+    }
 
     const fragment = document.createDocumentFragment();
-    for (const row of shown) {
-        fragment.append(rowElement(row, columns));
+    for (const item of items) {
+        fragment.append(rowElement(item, columns));
     }
     elements.tbody.replaceChildren(fragment);
 
     // Zeilen beendeter Prozesse aus dem Zwischenspeicher werfen.
-    const alive = new Set(shown.map(row => row.pid));
-    for (const pid of rowCache.keys()) {
-        if (!alive.has(pid)) {
-            rowCache.delete(pid);
+    const alive = new Set(items.map(item => item.key));
+    for (const key of rowCache.keys()) {
+        if (!alive.has(key)) {
+            rowCache.delete(key);
         }
     }
 
@@ -724,9 +770,54 @@ function renderTable() {
     elements.status.textContent = `${pinned.length + rest.length} von ${total} Prozessen${pinnedNote}${cut}`;
 }
 
+/**
+ * Eine zusammengefasste Zeile wird beim Aufklappen zu mehreren: der
+ * Elternprozess bleibt oben stehen, darunter erscheinen sein eigener Anteil und
+ * die Kindprozesse, nach Abstand zum Elternprozess eingerückt.
+ */
+function expandGroup(group) {
+    const head = { row: group, key: `g${group.pid}`, depth: 0, group: true };
+    if (!state.aggregate || !state.expanded.has(group.pid) || !group.members?.length) {
+        return [head];
+    }
+
+    const items = [head];
+
+    const own = state.processes.find(process => process.pid === group.pid);
+    if (own) {
+        items.push({ row: own, key: `c${own.pid}`, depth: 1, child: true, own: true });
+    }
+
+    for (const member of sortRows(group.members)) {
+        items.push({
+            row: member,
+            key: `c${member.pid}`,
+            // Tiefer als vier Ebenen wird die Einrückung nur noch unleserlich.
+            depth: Math.min(4, member.depth),
+            child: true,
+        });
+    }
+
+    return items;
+}
+
 // ---------- Anheften und Notizen ----------
 
 elements.tbody.addEventListener('click', event => {
+    const expander = event.target.closest('.expander');
+    if (expander) {
+        // Aufklappen darf nicht nebenbei das Anheften umschalten.
+        event.stopPropagation();
+        const pid = Number(expander.dataset.expand);
+        if (state.expanded.has(pid)) {
+            state.expanded.delete(pid);
+        } else {
+            state.expanded.add(pid);
+        }
+        renderTable();
+        return;
+    }
+
     const tr = event.target.closest('tr');
     if (!tr || event.target.closest('input')) {
         return;
@@ -735,6 +826,12 @@ elements.tbody.addEventListener('click', event => {
     // Die Notizspalte gehört dem Doppelklick — sonst schaltet der erste Klick
     // des Bearbeitens nebenbei das Anheften um.
     if (event.target.closest('td')?.dataset.key === 'note') {
+        return;
+    }
+
+    // Kindzeilen gehören zu ihrer aufgeklappten Gruppe; sie einzeln anzuheften
+    // ergäbe eine Zeile ohne Zusammenhang.
+    if (tr.dataset.child) {
         return;
     }
 
@@ -809,6 +906,112 @@ function startEditingNote(td, pid, name) {
     input.select();
 }
 
+// ---------- Kontextmenü ----------
+
+const rowMenu = document.getElementById('row-menu');
+
+function send(cmd, extra) {
+    if (host) {
+        host.postMessage(Object.assign({ cmd }, extra));
+    }
+}
+
+function closeRowMenu() {
+    rowMenu.hidden = true;
+}
+
+elements.tbody.addEventListener('contextmenu', event => {
+    const tr = event.target.closest('tr');
+    if (!tr) {
+        return;
+    }
+
+    event.preventDefault();
+    const pid = Number(tr.dataset.pid);
+
+    // Eine Gruppenzeile und der gleichnamige Einzelprozess haben dieselbe PID —
+    // je nach Zeilentyp ist die eine oder die andere gemeint.
+    const source = !tr.dataset.child && state.aggregate
+        ? aggregateTree(state.processes)
+        : state.processes;
+    const row = source.find(candidate => candidate.pid === pid);
+    if (!row) {
+        return;
+    }
+
+    const entries = [];
+
+    if (!tr.dataset.child && state.aggregate && row.children) {
+        entries.push([
+            state.expanded.has(pid) ? 'Kindprozesse einklappen' : `Kindprozesse einzeln anzeigen (${row.children})`,
+            () => {
+                if (state.expanded.has(pid)) {
+                    state.expanded.delete(pid);
+                } else {
+                    state.expanded.add(pid);
+                }
+                renderTable();
+            },
+        ]);
+    }
+
+    if (!tr.dataset.child) {
+        entries.push([
+            state.pinned.has(pid) ? 'Anheftung lösen' : 'Oben anheften',
+            () => {
+                if (state.pinned.has(pid)) {
+                    state.pinned.delete(pid);
+                } else {
+                    state.pinned.add(pid);
+                }
+                renderTable();
+            },
+        ]);
+    }
+
+    if (row.path) {
+        entries.push(['Pfad kopieren', () => navigator.clipboard?.writeText(row.path)]);
+    }
+
+    // Der Host fragt vor dem Beenden noch einmal nach.
+    entries.push([`„${row.name}“ beenden …`, () => send('killProcess', { pid, name: row.name }), 'danger']);
+
+    rowMenu.replaceChildren(...entries.map(([label, action, variant]) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        if (variant) {
+            button.className = variant;
+        }
+        button.textContent = label;
+        button.addEventListener('click', () => {
+            closeRowMenu();
+            action();
+        });
+        return button;
+    }));
+
+    rowMenu.hidden = false;
+
+    // Innerhalb des Fensters halten.
+    const width = rowMenu.offsetWidth;
+    const height = rowMenu.offsetHeight;
+    rowMenu.style.left = `${Math.min(event.clientX, window.innerWidth - width - 8)}px`;
+    rowMenu.style.top = `${Math.min(event.clientY, window.innerHeight - height - 8)}px`;
+});
+
+document.addEventListener('click', closeRowMenu);
+document.addEventListener('contextmenu', event => {
+    if (!event.target.closest('#processes tbody')) {
+        closeRowMenu();
+    }
+});
+window.addEventListener('blur', closeRowMenu);
+document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+        closeRowMenu();
+    }
+});
+
 // ---------- Spaltenauswahl ----------
 
 function buildColumnsMenu() {
@@ -852,6 +1055,9 @@ elements.columnsMenu.addEventListener('click', event => event.stopPropagation())
 // ---------- Systemübersicht ----------
 
 function renderSystemInfo(data) {
+    state.systemLoaded = (data.groups || []).length > 0 || (data.drives || []).length > 0;
+    elements.systemEmpty.hidden = state.systemLoaded;
+
     elements.systemGroups.replaceChildren(...(data.groups || []).map(group => {
         const card = document.createElement('section');
         card.className = 'info-card';
@@ -943,6 +1149,10 @@ for (const tab of document.querySelectorAll('.tab')) {
         // Einblenden neu gezeichnet werden.
         if (state.view === 'processes') {
             drawChart();
+        } else if (!state.systemLoaded) {
+            // Die Übersicht wird genau einmal gesendet. Ist sie nicht angekommen
+            // — etwa weil die Seite beim Senden noch lud —, hier nachfragen.
+            send('requestSystemInfo');
         }
     });
 }

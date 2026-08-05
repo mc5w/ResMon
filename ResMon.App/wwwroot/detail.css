@@ -343,6 +343,12 @@ body {
     scrollbar-color: #3a4150 transparent;
 }
 
+.system-empty {
+    color: var(--muted);
+    font-size: 12px;
+    padding: 12px 2px;
+}
+
 .system-groups,
 .system-drives {
     display: grid;
@@ -595,6 +601,86 @@ td.path {
     display: flex;
     align-items: baseline;
     gap: 8px;
+}
+
+.expander,
+.expander-spacer {
+    flex: none;
+    width: 16px;
+    display: inline-block;
+}
+
+.expander {
+    font: inherit;
+    font-size: 10px;
+    line-height: 1;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-align: left;
+}
+
+.expander:hover {
+    color: var(--text);
+}
+
+/* Aufgeklappte Kindprozesse: abgesetzt, aber nicht aufdringlich. */
+tbody tr.child-row {
+    background: rgba(255, 255, 255, 0.02);
+    cursor: default;
+}
+
+tbody tr.child-row td {
+    color: var(--muted);
+}
+
+tbody tr.child-row td.num {
+    color: var(--text);
+}
+
+/* ---------- Kontextmenü ---------- */
+
+.context-menu {
+    position: fixed;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    min-width: 200px;
+    padding: 5px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.55);
+}
+
+.context-menu[hidden] {
+    display: none;
+}
+
+.context-menu button {
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    padding: 6px 9px;
+    cursor: pointer;
+}
+
+.context-menu button:hover {
+    background: rgba(255, 255, 255, 0.07);
+}
+
+.context-menu button.danger {
+    color: #f87171;
+}
+
+.context-menu button.danger:hover {
+    background: rgba(248, 113, 113, 0.14);
 }
 
 .desc {

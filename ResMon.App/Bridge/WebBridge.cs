@@ -24,6 +24,8 @@ public sealed class WebCommand
 {
     public string? Cmd { get; set; }
     public double? Value { get; set; }
+    public int? Pid { get; set; }
+    public string? Name { get; set; }
 }
 
 /// <summary>

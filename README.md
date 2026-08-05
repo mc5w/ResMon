@@ -51,6 +51,11 @@ Im Detailfenster:
   CPU, Grafik, Arbeitsspeicher, Mainboard und die Datenträger samt Laufwerken
 - **Klick auf eine Zeile** heftet den Prozess oben an. Angeheftete Zeilen bleiben
   dort stehen, überstehen den Filter und wandern beim Sortieren nicht mehr
+- **Dreieck vor dem Namen** klappt einen zusammengefassten Prozessbaum auf: der
+  Elternprozess bleibt oben, darunter erscheinen sein eigener Anteil und die
+  Kindprozesse, nach Abstand zum Elternprozess eingerückt
+- **Rechtsklick auf eine Zeile** öffnet ein Menü mit Anheften, Aufklappen, Pfad
+  kopieren und Prozess beenden
 - **Doppelklick auf die Notizspalte** (Stiftsymbol) öffnet ein Eingabefeld.
   Notizen hängen am Prozessnamen und bleiben über Neustarts erhalten
 - **Spalten ▾** blendet Spalten ein und aus
@@ -97,6 +102,25 @@ Zusätzlich liefert LibreHardwareMonitor bei NVIDIA-Karten neben
 `GPU Memory Used` auch `D3D Dedicated Memory Used`; für den VRAM-Wert wird
 gezielt der erste Sensor gewählt, sonst wird nur ein Teil des belegten Speichers
 angezeigt.
+
+Zwei weitere Annahmen aus WMI haben sich als unbrauchbar erwiesen:
+`ASSOCIATORS OF` wirft bei Datenträgern ohne Partitionen während der Aufzählung
+„Nicht gefunden" — die Zuordnung Datenträger→Laufwerk läuft deshalb über
+`Win32_LogicalDiskToPartition`. Und `Win32_VideoController.AdapterRAM` ist ein
+32-Bit-Feld, das ab 4 GB VRAM den gedeckelten Wert 4293918720 meldet; Werte nahe
+der Grenze werden verworfen.
+
+## Abweichung von DESIGN.md §12
+
+Das Command-Set der Bridge enthält entgegen §12 ein Kommando zum **Beenden von
+Prozessen**. Es ist auf ausdrücklichen Wunsch nachgezogen worden und hat zwei
+Sicherungen: einen Bestätigungsdialog im Host, der Name und PID nennt, und eine
+Sperre für die Prozesse, deren Ende Windows zum Absturz bringt (`smss.exe`,
+`csrss.exe`, `wininit.exe`, `winlogon.exe`, `services.exe`, `lsass.exe`, PID ≤ 4).
+
+Hinzugekommen ist außerdem `requestSystemInfo`: die Systemübersicht wird genau
+einmal gesendet, und die Oberfläche kann sie nachfordern, falls sie die Nachricht
+verpasst hat.
 
 ## CPU-Temperatur und Speicherintegrität
 
