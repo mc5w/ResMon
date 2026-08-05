@@ -1,0 +1,31 @@
+## .NET
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+## Build / publish
+artifacts/
+publish/
+*.binlog
+
+## NuGet
+*.nupkg
+packages/
+!packages/build/
+
+## Rider / VS Code
+.idea/
+.vscode/
+
+## Laufzeitartefakte dieser Anwendung
+WebView2/
+*.WebView2/
+

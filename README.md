@@ -1,0 +1,84 @@
+# ResMon
+
+Desktop-Overlay für Windows 11 mit Live-Anzeige von CPU-, GPU- und RAM-Auslastung
+inklusive Temperaturen, plus Detailfenster mit genauerer Prozessaufschlüsselung
+als der Task-Manager.
+
+Umsetzung von [DESIGN.md](DESIGN.md).
+
+## Aufbau
+
+| Projekt | Zweck |
+|---|---|
+| `ResMon.Core` | Erfassung: PDH-P/Invoke, LibreHardwareMonitor, Prozess- und Dienstauflösung, Collector |
+| `ResMon.App` | WPF-Host mit WebView2-Oberfläche, Overlay, Detailfenster, Tray-Icon |
+| `ResMon.Probe` | Konsolen-Diagnose für die Rohdaten (Kontrollpunkt aus DESIGN.md §15) |
+
+## Voraussetzungen
+
+- Windows 11 x64
+- .NET 9 SDK (über `global.json` gepinnt)
+- WebView2-Runtime (auf Windows 11 vorinstalliert)
+- Administratorrechte zur Laufzeit — LibreHardwareMonitorLib lädt einen
+  Kernel-Treiber für die Temperatursensoren
+
+## Bauen
+
+```bash
+dotnet build ResMon.sln -c Release
+```
+
+## Starten
+
+Die Anwendung fordert per Manifest Administratorrechte an; der Start löst also
+eine UAC-Abfrage aus.
+
+```bash
+ResMon.App\bin\x64\Release\net9.0-windows\ResMon.exe
+```
+
+Beim Start erscheint das Overlay an der zuletzt gespeicherten Position und ein
+Tray-Icon. Bedienung:
+
+- **Kopfzeile ziehen** — Overlay verschieben, Position wird gespeichert
+- **Mausrad über der Karte** — Deckkraft ändern
+- **Details** — Prozessfenster öffnen (erst dann läuft die Prozess-Enumeration)
+- **Tray-Menü** — Deckkraft, sichtbare Zeilen, Klick-Durchlässigkeit, Autostart, Beenden
+
+Einstellungen liegen in `%AppData%\ResMon\settings.json`.
+
+## Diagnose
+
+`ResMon.Probe` gibt die Rohdaten aus, ohne Oberfläche:
+
+```bash
+ResMon.Probe\bin\x64\Release\net9.0\ResMon.Probe.exe sensors
+```
+
+| Modus | Ausgabe |
+|---|---|
+| `sensors` | Alle von LibreHardwareMonitor gefundenen Sensoren (für Temperaturen als Administrator ausführen) |
+| `counters [n]` | CPU-, RAM- und GPU-Aggregate im Sekundentakt |
+| `gpu [n]` | Rohe GPU-Engine-Instanzen mit PID und Engine-Typ |
+| `processes [n]` | Top-15-Prozesse nach CPU inklusive Dienstauflösung |
+| `paths` | Welche der benötigten PDH-Zählerpfade dieses System kennt |
+
+Für die Arbeit an der Oberfläche ohne Elevation lässt sich `wwwroot` als
+statische Seite ausliefern; die Seiten rendern dann
+ohne Daten, `render(…)` bzw. `renderTiles(…)` lassen sich in der Konsole füttern.
+
+## Abweichungen vom Entwurfsdokument
+
+Beim Umsetzen haben sich zwei Annahmen aus DESIGN.md §8.2 als nicht zutreffend
+erwiesen (geprüft mit `ResMon.Probe paths` auf Windows 11 26200):
+
+1. **`\Process V2(*)\ID Process` existiert nicht.** Im Zählersatz `Process V2`
+   heißt der Zähler `Process ID`. `ResMon.Core` probiert beide Schreibweisen und
+   fällt notfalls auf den älteren `Process`-Satz zurück.
+2. **Die Instanznamen von `Process V2` haben die Form `name:pid`**, nicht
+   `name_pid` — relevant für die Rückfallebene der Namensauflösung.
+
+Zusätzlich liefert LibreHardwareMonitor bei NVIDIA-Karten neben
+`GPU Memory Used` auch `D3D Dedicated Memory Used`; für den VRAM-Wert wird
+gezielt der erste Sensor gewählt, sonst wird nur ein Teil des belegten Speichers
+angezeigt.

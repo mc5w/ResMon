@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RootNamespace>ResMon.App</RootNamespace>
+    <AssemblyName>ResMon</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- WPF und WinForms im selben Prozess: das Tray-Icon kommt von NotifyIcon.
+         WFO0003 verlangt, DPI-Awareness über die WinForms-API zu setzen — hier
+         ist WPF der Fenster-Host, deshalb bleibt sie im Manifest. -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4129.50" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ResMon.Core\ResMon.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Die Oberfläche liegt als HTML neben der Exe und wird über
+         SetVirtualHostNameToFolderMapping eingebunden (DESIGN.md §11). -->
+    <Content Include="wwwroot\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>

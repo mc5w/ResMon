@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ResMon — Details</title>
+    <link rel="stylesheet" href="detail.css">
+</head>
+<body>
+    <section class="tiles">
+        <article class="tile" data-metric="cpu">
+            <h2>CPU</h2>
+            <p class="big"><span id="cpu-percent">–</span><span class="unit">%</span></p>
+            <p class="sub" id="cpu-sub">–</p>
+            <div class="cores" id="cpu-cores"></div>
+        </article>
+
+        <article class="tile" data-metric="gpu">
+            <h2>GPU</h2>
+            <p class="big"><span id="gpu-percent">–</span><span class="unit">%</span></p>
+            <p class="sub" id="gpu-sub">–</p>
+            <div class="engines" id="gpu-engines"></div>
+        </article>
+
+        <article class="tile" data-metric="ram">
+            <h2>Arbeitsspeicher</h2>
+            <p class="big"><span id="ram-percent">–</span><span class="unit">%</span></p>
+            <p class="sub" id="ram-sub">–</p>
+        </article>
+    </section>
+
+    <section class="chart-panel">
+        <div class="chart-header">
+            <span>Verlauf, letzte 5 Minuten</span>
+            <span class="legend">
+                <i data-metric="cpu"></i>CPU
+                <i data-metric="gpu"></i>GPU
+                <i data-metric="ram"></i>RAM
+            </span>
+        </div>
+        <canvas id="history"></canvas>
+    </section>
+
+    <section class="controls">
+        <input id="filter" type="search" placeholder="Prozessname filtern …" autocomplete="off" spellcheck="false">
+        <label><input id="aggregate" type="checkbox"> Prozessbäume zusammenfassen</label>
+        <label><input id="only-active" type="checkbox"> Nur aktive</label>
+        <span class="status" id="status">–</span>
+    </section>
+
+    <div class="table-wrap">
+        <table id="processes">
+            <thead>
+                <tr>
+                    <th data-sort="name" class="col-name">Name</th>
+                    <th data-sort="pid" class="num">PID</th>
+                    <th data-sort="cpu" class="num sorted-desc">CPU&nbsp;%</th>
+                    <th data-sort="ws" class="num">Arbeitsspeicher</th>
+                    <th data-sort="gpu" class="num">GPU&nbsp;%</th>
+                    <th data-sort="engines" class="col-engines">GPU-Engines</th>
+                    <th data-sort="gpuMem" class="num">VRAM</th>
+                    <th data-sort="services" class="col-services">Dienste</th>
+                </tr>
+            </thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <script src="detail.js"></script>
+</body>
+</html>

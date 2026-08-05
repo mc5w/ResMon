@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ResMon</title>
+    <link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+    <div class="card">
+        <header id="grip">
+            <span class="brand">ResMon</span>
+            <span class="spacer"></span>
+            <button id="btn-close" title="Beenden" aria-label="Beenden">&#10005;</button>
+        </header>
+
+        <div class="rows">
+            <div class="row" data-metric="cpu">
+                <span class="label">CPU</span>
+                <canvas class="spark" width="40" height="16"></canvas>
+                <span class="bar"><span class="fill"></span></span>
+                <span class="value">–</span>
+                <span class="temp">–</span>
+            </div>
+            <div class="row" data-metric="gpu">
+                <span class="label">GPU</span>
+                <canvas class="spark" width="40" height="16"></canvas>
+                <span class="bar"><span class="fill"></span></span>
+                <span class="value">–</span>
+                <span class="temp">–</span>
+            </div>
+            <div class="row" data-metric="ram">
+                <span class="label">RAM</span>
+                <canvas class="spark" width="40" height="16"></canvas>
+                <span class="bar"><span class="fill"></span></span>
+                <span class="value">–</span>
+                <span class="temp">–</span>
+            </div>
+        </div>
+
+        <footer>
+            <span id="ram-detail" class="hint">–</span>
+            <button id="btn-detail">Details</button>
+        </footer>
+    </div>
+
+    <script src="overlay.js"></script>
+</body>
+</html>
