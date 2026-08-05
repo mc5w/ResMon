@@ -9,6 +9,7 @@
     --gpu: #4ade80;
     --ram: #fb923c;
     --net: #a78bfa;
+    --disk: #22d3ee;
 }
 
 * {
@@ -36,20 +37,96 @@ body {
 
 .tiles {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, 1fr);
     gap: 10px;
 }
 
 .tile[data-metric="net"] .big { color: var(--net); }
+.tile[data-metric="disk"] .big { color: var(--disk); }
+
+.notices {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.notices:empty {
+    display: none;
+}
 
 .notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
     background: rgba(251, 191, 36, 0.10);
     border: 1px solid rgba(251, 191, 36, 0.35);
     color: #fcd34d;
     border-radius: 8px;
-    padding: 7px 11px;
+    padding: 7px 8px 7px 11px;
     font-size: 12px;
     line-height: 1.45;
+}
+
+.notice span {
+    flex: 1;
+}
+
+.notice-close {
+    flex: none;
+    font: inherit;
+    line-height: 1;
+    color: inherit;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 3px 6px;
+    cursor: pointer;
+    opacity: 0.7;
+}
+
+.notice-close:hover {
+    opacity: 1;
+    background: rgba(251, 191, 36, 0.18);
+}
+
+/* ---------- Ansichten ---------- */
+
+.tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+.tab {
+    font: inherit;
+    font-size: 12px;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 7px 14px;
+    cursor: pointer;
+}
+
+.tab:hover {
+    color: var(--text);
+}
+
+.tab.active {
+    color: var(--text);
+    border-bottom-color: var(--cpu);
+}
+
+.view {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.view[hidden] {
+    display: none;
 }
 
 .tile {
@@ -255,9 +332,114 @@ body {
     background: rgba(255, 255, 255, 0.06);
 }
 
-.hint-bar {
+/* ---------- Systemübersicht ---------- */
+
+.system-wrap {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 4px;
+    scrollbar-width: thin;
+    scrollbar-color: #3a4150 transparent;
+}
+
+.system-groups,
+.system-drives {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+    gap: 10px;
+    align-items: start;
+}
+
+.system-heading {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 16px 0 8px;
+}
+
+.info-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 11px 13px 13px;
+}
+
+.info-card h4 {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 8px;
+}
+
+.info-card dl {
+    display: grid;
+    grid-template-columns: minmax(90px, auto) 1fr;
+    gap: 4px 12px;
+    font-size: 12px;
+}
+
+.info-card dt {
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.info-card dd {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.drive-meta {
     font-size: 11px;
     color: var(--muted);
+    margin-bottom: 10px;
+}
+
+.volume + .volume {
+    margin-top: 12px;
+}
+
+.volume-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+
+.volume-size {
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.volume-bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--panel-2);
+    overflow: hidden;
+}
+
+.volume-bar i {
+    display: block;
+    height: 100%;
+    border-radius: 3px;
+    background: var(--disk);
+}
+
+.volume-bar i.high { background: #fbbf24; }
+.volume-bar i.full { background: #f87171; }
+
+.volume-foot {
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
 }
 
 /* ---------- Tabelle ---------- */
@@ -339,12 +521,30 @@ tbody tr.pinned td:first-child {
 
 td.note {
     color: #fcd34d;
-    min-width: 110px;
+    min-width: 130px;
 }
 
-td.note:empty::after {
-    content: "—";
-    color: var(--border);
+td.note .note-pencil {
+    color: var(--muted);
+    margin-right: 6px;
+    opacity: 0.55;
+}
+
+tbody tr:hover td.note .note-pencil {
+    opacity: 1;
+    color: #fcd34d;
+}
+
+td.note .note-text.empty {
+    color: var(--muted);
+    font-style: italic;
+    opacity: 0.6;
+}
+
+td.path {
+    color: var(--muted);
+    font-size: 11px;
+    max-width: 420px;
 }
 
 .note-input {

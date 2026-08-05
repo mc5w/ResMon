@@ -1,5 +1,6 @@
 using System.Windows;
 using ResMon.App.Bridge;
+using ResMon.Core.Inventory;
 using ResMon.Core.Model;
 // WinForms ist wegen des Tray-Icons referenziert und bringt eigene Typen mit.
 using MessageBox = System.Windows.MessageBox;
@@ -14,6 +15,7 @@ public partial class DetailWindow : Window
 {
     private bool _webReady;
     private IReadOnlyList<ProcessSample>? _lastSentProcesses;
+    private SystemInfo? _pendingSystemInfo;
 
     public DetailWindow()
     {
@@ -27,6 +29,12 @@ public partial class DetailWindow : Window
         {
             await WebViewHost.InitializeAsync(Web, "detail.html", transparent: false);
             _webReady = true;
+
+            if (_pendingSystemInfo is { } pending)
+            {
+                _pendingSystemInfo = null;
+                PushSystemInfo(pending);
+            }
         }
         catch (Exception ex)
         {
@@ -51,5 +59,21 @@ public partial class DetailWindow : Window
 
         Web.CoreWebView2.PostWebMessageAsJson(
             WebBridge.BuildDetailPayload(snapshot, history, processes, diagnostics));
+    }
+
+    /// <summary>
+    /// Schiebt die Systemübersicht nach. Sie ändert sich nicht und wird deshalb
+    /// nur einmal gesendet — sobald die WMI-Abfragen durch sind.
+    /// </summary>
+    public void PushSystemInfo(SystemInfo info)
+    {
+        if (!_webReady)
+        {
+            // Noch nicht bereit: nach der Initialisierung nachholen.
+            _pendingSystemInfo = info;
+            return;
+        }
+
+        Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildSystemPayload(info));
     }
 }

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.Versioning;
+using ResMon.Core.Inventory;
 using ResMon.Core.Model;
 using ResMon.Core.Native;
 using ResMon.Core.Processes;
@@ -26,6 +27,7 @@ internal static class Program
             "gpu" => DumpGpu(Iterations(args, 5)),
             "processes" => DumpProcesses(Iterations(args, 3)),
             "paths" => DumpPaths(),
+            "system" => DumpSystem(),
             _ => Help(),
         };
     }
@@ -36,11 +38,13 @@ internal static class Program
             ResMon.Probe — Diagnosewerkzeug
 
               sensors            Alle von LibreHardwareMonitor gefundenen Sensoren auflisten
-              counters [n]       CPU-, RAM- und GPU-Aggregate n-mal im Sekundentakt ausgeben
+              counters [n]       CPU-, RAM-, GPU- und Netzaggregate n-mal im Sekundentakt ausgeben
               gpu [n]            GPU-Engine-Instanzen roh ausgeben
               processes [n]      Top-15-Prozesse nach CPU ausgeben
+              system             Systemübersicht: OS, CPU, GPU, RAM, Mainboard, Datenträger
+              paths              Prüfen, welche PDH-Zählerpfade dieses System kennt
 
-            Erfordert Administratorrechte (Sensor-Treiber).
+            Temperaturen und der Netzverkehr pro Prozess brauchen Administratorrechte.
             """);
         return 1;
     }
@@ -263,6 +267,36 @@ internal static class Program
         PdhCounter? v2 = added.First(a => a.Path == @"\Process V2(*)\% Processor Time").Counter;
         foreach (PdhInstanceValue value in v2!.ReadArrayDouble(noCap100: true).Take(8))
             Console.WriteLine($"    {value.Instance}");
+
+        return 0;
+    }
+
+    /// <summary>Gibt die Systemübersicht aus, wie sie das Detailfenster anzeigt.</summary>
+    private static int DumpSystem()
+    {
+        SystemInfo info = SystemInfoProvider.Collect();
+
+        foreach (InfoGroup group in info.Groups)
+        {
+            Console.WriteLine(group.Title);
+            foreach (InfoItem item in group.Items)
+                Console.WriteLine($"    {item.Label,-24} {item.Value}");
+            Console.WriteLine();
+        }
+
+        Console.WriteLine("Datenträger");
+        foreach (PhysicalDriveInfo drive in info.Drives)
+        {
+            string size = drive.SizeBytes > 0 ? $"{drive.SizeBytes / 1000000000.0:N0} GB" : "";
+            Console.WriteLine($"    {drive.Model}  {drive.InterfaceType} {drive.MediaType} {size}");
+            foreach (VolumeInfo volume in drive.Volumes)
+            {
+                Console.WriteLine(
+                    $"        {volume.Name} {volume.Label ?? "",-18} {volume.FileSystem,-6} " +
+                    $"{volume.UsedBytes / 1073741824.0,8:N1} / {volume.TotalBytes / 1073741824.0,8:N1} GB  " +
+                    $"({volume.UsedPercent:N0} % belegt)");
+            }
+        }
 
         return 0;
     }

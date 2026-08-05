@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="detail.css">
 </head>
 <body>
-    <p id="notice" class="notice" hidden></p>
+    <div id="notices" class="notices"></div>
 
     <section class="tiles">
         <article class="tile" data-metric="cpu">
@@ -28,54 +28,72 @@
             <h2>Arbeitsspeicher</h2>
             <p class="big"><span id="ram-percent">–</span><span class="unit">%</span></p>
             <p class="sub" id="ram-sub">–</p>
-            <p class="sub" id="ram-commit" title="Summe des Speichers, den Windows allen Prozessen fest zugesagt hat. Er darf jederzeit angefordert werden und wird bei Bedarf in die Auslagerungsdatei geschrieben — er liegt deshalb nicht zwangsläufig im RAM und kann größer sein als der eingebaute Arbeitsspeicher.">–</p>
+            <p class="sub" id="ram-commit" title="Zugesichert (Commit Charge): die Summe des Speichers, den Windows allen Prozessen fest zugesagt hat. Jeder Prozess darf ihn jederzeit anfordern, also muss Windows ihn vorhalten — im RAM oder in der Auslagerungsdatei. Der Wert kann deshalb größer sein als der eingebaute Arbeitsspeicher und sagt nichts darüber aus, wie viel gerade wirklich im RAM liegt.">–</p>
         </article>
 
         <article class="tile" data-metric="net">
             <h2>Netzwerk</h2>
-            <p class="big"><span id="net-rx">–</span><span class="unit" id="net-rx-unit">kB/s</span></p>
+            <p class="big"><span id="net-rx">–</span><span class="unit" id="net-rx-unit">kB/s ↓</span></p>
             <p class="sub" id="net-sub">–</p>
+        </article>
+
+        <article class="tile" data-metric="disk">
+            <h2>Datenträger</h2>
+            <p class="big"><span id="disk-busy">–</span><span class="unit">% aktiv</span></p>
+            <p class="sub" id="disk-sub">–</p>
         </article>
     </section>
 
-    <section class="chart-panel">
-        <div class="chart-header">
-            <span>Verlauf, letzte 5 Minuten</span>
-            <span class="legend">
-                <i data-metric="cpu"></i>CPU
-                <i data-metric="gpu"></i>GPU
-                <i data-metric="ram"></i>RAM
-            </span>
+    <nav class="tabs">
+        <button type="button" class="tab active" data-view="processes">Prozesse</button>
+        <button type="button" class="tab" data-view="system">System</button>
+    </nav>
+
+    <!-- Ansicht: Prozesse -->
+    <div id="view-processes" class="view">
+        <section class="chart-panel">
+            <div class="chart-header">
+                <span>Verlauf, letzte 5 Minuten</span>
+                <span class="legend">
+                    <i data-metric="cpu"></i>CPU
+                    <i data-metric="gpu"></i>GPU
+                    <i data-metric="ram"></i>RAM
+                </span>
+            </div>
+            <canvas id="history"></canvas>
+        </section>
+
+        <section class="controls">
+            <input id="filter" type="search" placeholder="Prozessname, Dienst, Pfad oder Notiz filtern …" autocomplete="off" spellcheck="false">
+            <label><input id="aggregate" type="checkbox"> Prozessbäume zusammenfassen</label>
+            <label><input id="only-active" type="checkbox"> Nur aktive</label>
+
+            <div class="menu">
+                <button id="columns-button" type="button">Spalten ▾</button>
+                <div id="columns-menu" class="menu-panel" hidden></div>
+            </div>
+
+            <span class="status" id="status">–</span>
+        </section>
+
+        <div class="table-wrap">
+            <table id="processes">
+                <thead>
+                    <tr id="head-row"></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
         </div>
-        <canvas id="history"></canvas>
-    </section>
-
-    <section class="controls">
-        <input id="filter" type="search" placeholder="Prozessname, Dienst oder Notiz filtern …" autocomplete="off" spellcheck="false">
-        <label><input id="aggregate" type="checkbox"> Prozessbäume zusammenfassen</label>
-        <label><input id="only-active" type="checkbox"> Nur aktive</label>
-
-        <div class="menu">
-            <button id="columns-button" type="button">Spalten ▾</button>
-            <div id="columns-menu" class="menu-panel" hidden></div>
-        </div>
-
-        <span class="status" id="status">–</span>
-    </section>
-
-    <div class="table-wrap">
-        <table id="processes">
-            <thead>
-                <tr id="head-row"></tr>
-            </thead>
-            <tbody></tbody>
-        </table>
     </div>
 
-    <p class="hint-bar">
-        Klick auf eine Zeile heftet den Prozess oben an, damit er beim Sortieren nicht mehr wandert.
-        Doppelklick auf die Notizspalte zum Bearbeiten.
-    </p>
+    <!-- Ansicht: System -->
+    <div id="view-system" class="view" hidden>
+        <div class="system-wrap">
+            <div id="system-groups" class="system-groups"></div>
+            <h3 class="system-heading">Datenträger und Laufwerke</h3>
+            <div id="system-drives" class="system-drives"></div>
+        </div>
+    </div>
 
     <script src="detail.js"></script>
 </body>

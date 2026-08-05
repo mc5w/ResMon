@@ -14,4 +14,7 @@ public sealed record ProcessSample(
     long GpuMemBytes,
     IReadOnlyList<string> ServiceNames,
     double NetReceivedBytesPerSec,
-    double NetSentBytesPerSec);
+    double NetSentBytesPerSec,
+    double IoReadBytesPerSec,
+    double IoWriteBytesPerSec,
+    string? ImagePath);

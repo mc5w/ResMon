@@ -1,4 +1,5 @@
 using ResMon.Core.Config;
+using ResMon.Core.Inventory;
 using ResMon.Core.Model;
 using ResMon.Core.Native;
 using ResMon.Core.Processes;
@@ -22,6 +23,7 @@ public sealed class Collector : IDisposable
     private readonly CounterSource _counters;
     private readonly GpuEngineSource _gpu;
     private readonly NetworkSource _network;
+    private readonly DiskSource _disk;
     private readonly HardwareSource _hardware = new();
     private readonly ServiceResolver _services = new();
     private readonly ProcessSampler _processes;
@@ -52,8 +54,12 @@ public sealed class Collector : IDisposable
         _counters = new CounterSource(_aggregateQuery);
         _gpu = new GpuEngineSource(_aggregateQuery);
         _network = new NetworkSource(_aggregateQuery);
+        _disk = new DiskSource(_aggregateQuery);
         _processes = new ProcessSampler(_services);
         History = new RingBuffer<AggregateSample>(HistoryCapacity);
+
+        // WMI ist langsam; die Übersicht wird einmalig im Hintergrund erhoben.
+        SystemInfoReady = Task.Run(SystemInfoProvider.Collect);
     }
 
     /// <summary>Wird nach jedem Aggregat-Takt im Timer-Thread ausgelöst.</summary>
@@ -65,6 +71,18 @@ public sealed class Collector : IDisposable
     public string? HardwareError => _hardware.OpenError;
 
     public bool GpuCountersAvailable => _gpu.Available;
+
+    public bool NetworkCountersAvailable => _network.Available;
+
+    public bool DiskCountersAvailable => _disk.Available;
+
+    public bool ProcessCountersAvailable => _processes.Available;
+
+    /// <summary>True, wenn <c>Process V2</c> fehlt und der ältere Zählersatz greift.</summary>
+    public bool UsesLegacyProcessCounters => _processes.UsesLegacyCounterSet;
+
+    /// <summary>Läuft beim ersten Start im Hintergrund; WMI braucht dafür einen Moment.</summary>
+    public Task<SystemInfo> SystemInfoReady { get; }
 
     /// <summary>
     /// Fehlermeldung, falls die ETW-Sitzung für den Netzverkehr pro Prozess nicht
@@ -159,6 +177,7 @@ public sealed class Collector : IDisposable
             CounterReading counters;
             GpuEngineReading gpu;
             NetworkMetrics network;
+            DiskMetrics disk;
             lock (_aggregateGate)
             {
                 // Das erste Sample nach dem Start liefert keine Deltas und wird verworfen.
@@ -168,6 +187,7 @@ public sealed class Collector : IDisposable
                 counters = _counters.Read();
                 gpu = _gpu.Read();
                 network = _network.Read();
+                disk = _disk.Read();
             }
 
             _lastGpuByPid = gpu.ByProcess;
@@ -209,9 +229,12 @@ public sealed class Collector : IDisposable
                 cpu.PackageTempC,
                 gpuMetrics.TempC,
                 network.ReceivedBytesPerSec,
-                network.SentBytesPerSec));
+                network.SentBytesPerSec,
+                disk.ReadBytesPerSec,
+                disk.WriteBytesPerSec));
 
-            SnapshotReady?.Invoke(new SystemSnapshot(timestamp, cpu, gpuMetrics, memory, network, _lastProcesses));
+            SnapshotReady?.Invoke(new SystemSnapshot(
+                timestamp, cpu, gpuMetrics, memory, network, disk, _lastProcesses));
         }
         finally
         {

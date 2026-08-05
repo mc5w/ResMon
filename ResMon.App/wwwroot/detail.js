@@ -1,10 +1,12 @@
-// Detailfenster. Sortierung, Filterung, Aggregation, Spaltenauswahl und Notizen
-// laufen vollständig hier, der Host liefert nur Rohdaten (DESIGN.md §13).
+// Detailfenster. Sortierung, Filterung, Aggregation, Spaltenauswahl, Notizen und
+// die Systemübersicht laufen vollständig hier, der Host liefert nur Rohdaten
+// (DESIGN.md §13).
 
 const host = window.chrome && window.chrome.webview;
 
 const STORAGE_COLUMNS = 'resmon.columns';
 const STORAGE_NOTES = 'resmon.notes';
+const STORAGE_NOTICES = 'resmon.dismissedNotices';
 
 // ---------- Formatierung ----------
 
@@ -14,6 +16,9 @@ const nf0 = new Intl.NumberFormat('de-DE', { maximumFractionDigits: 0 });
 function formatBytes(bytes) {
     if (!bytes) {
         return '–';
+    }
+    if (bytes >= 1099511627776) {
+        return `${nf1.format(bytes / 1099511627776)} TB`;
     }
     if (bytes >= 1073741824) {
         return `${nf1.format(bytes / 1073741824)} GB`;
@@ -49,21 +54,88 @@ function engineList(row) {
         .join(', ');
 }
 
+// ---------- Erklärungen ----------
+
+/** Was die einzelnen GPU-Engine-Typen tatsächlich bearbeiten. */
+const ENGINE_HELP = {
+    '3D': 'Rendering: Spiele, Desktop-Komposition, Browser und alles, was zeichnet. In der Regel der aussagekräftigste Wert.',
+    'Copy': 'Datentransfer zwischen Arbeits- und Grafikspeicher — etwa das Laden von Texturen. Kurze Ausschläge sind normal.',
+    'VideoDecode': 'Hardware-Dekodierung von Video. Steigt beim Abspielen von Videos und in Videokonferenzen.',
+    'VideoEncode': 'Hardware-Kodierung von Video: Aufnahme, Streaming, Bildschirmübertragung.',
+    'VideoProcessing': 'Nachbearbeitung von Video: Skalieren, Farbraumwandlung, Deinterlacing.',
+    'Compute': 'Allgemeine Berechnungen auf der GPU (CUDA, OpenCL, DirectML) — KI-Modelle, Bildbearbeitung, Simulationen.',
+    'Security': 'Geschützte Inhalte: kopiergeschützte Videowiedergabe.',
+    'Overlay': 'Hardware-Overlays, etwa für Videoebenen ohne Umweg über den Desktop-Compositor.',
+    'VR': 'Wiedergabe für VR-Headsets.',
+};
+
+function engineTooltip(name) {
+    return ENGINE_HELP[name] || `GPU-Engine "${name}". Windows zählt die Auslastung getrennt nach Engine-Typ.`;
+}
+
 // ---------- Spaltendefinition ----------
 
 const COLUMNS = [
-    { key: 'name', label: 'Name', align: 'left', locked: true, text: row => row.name },
-    { key: 'pid', label: 'PID', align: 'right', text: row => String(row.pid) },
-    { key: 'cpu', label: 'CPU %', align: 'right', load: true, text: row => formatPercent(row.cpu) },
-    { key: 'ws', label: 'Arbeitsspeicher', align: 'right', text: row => formatBytes(row.ws) },
-    { key: 'priv', label: 'Privat', align: 'right', off: true, text: row => formatBytes(row.priv) },
-    { key: 'gpu', label: 'GPU %', align: 'right', load: true, text: row => formatPercent(row.gpu) },
-    { key: 'engines', label: 'GPU-Engines', align: 'left', text: row => engineList(row) || '–' },
-    { key: 'gpuMem', label: 'VRAM', align: 'right', text: row => formatBytes(row.gpuMem) },
-    { key: 'rx', label: '↓ Download', align: 'right', text: row => formatRate(row.rx) },
-    { key: 'tx', label: '↑ Upload', align: 'right', text: row => formatRate(row.tx) },
-    { key: 'services', label: 'Dienste', align: 'left', text: row => (row.services || []).join(', ') || '–' },
-    { key: 'note', label: 'Notiz', align: 'left', text: row => notes[row.name] || '' },
+    {
+        key: 'name', label: 'Name', align: 'left', locked: true, text: row => row.name,
+        help: 'Name der ausführbaren Datei, daneben die Dateibeschreibung aus der Versionsressource.',
+    },
+    {
+        key: 'pid', label: 'PID', align: 'right', text: row => String(row.pid),
+        help: 'Prozesskennung. Windows vergibt sie beim Start und verwendet sie nach dem Ende eines Prozesses wieder — sie identifiziert einen Prozess also nur, solange er läuft.',
+    },
+    {
+        key: 'cpu', label: 'CPU %', align: 'right', load: true, text: row => formatPercent(row.cpu),
+        help: 'Anteil an der gesamten Rechenkapazität, über alle Kerne gemittelt. 100 % bedeutet, dass alle logischen Prozessoren voll ausgelastet sind.',
+    },
+    {
+        key: 'ws', label: 'Arbeitsspeicher', align: 'right', text: row => formatBytes(row.ws),
+        help: 'Privater Arbeitssatz: Speicher, der exklusiv diesem Prozess gehört und gerade tatsächlich im RAM liegt. Das ist die Spalte, die der Task-Manager "Arbeitsspeicher" nennt.',
+    },
+    {
+        key: 'priv', label: 'Privat', align: 'right', off: true, text: row => formatBytes(row.priv),
+        help: 'Private Bytes: Speicher, den der Prozess exklusiv belegt hat — einschließlich der Teile, die Windows in die Auslagerungsdatei geschoben hat. Deshalb meist größer als der Arbeitsspeicher.',
+    },
+    {
+        key: 'gpu', label: 'GPU %', align: 'right', load: true, text: row => formatPercent(row.gpu),
+        help: 'Auslastung der Grafikkarte durch diesen Prozess: das Maximum über die Engine-Typen, nicht deren Summe.',
+    },
+    {
+        key: 'engines', label: 'GPU-Engines', align: 'left', text: row => engineList(row) || '–',
+        help: 'Aufschlüsselung der GPU-Last nach Engine-Typ (3D, Copy, VideoDecode …). Windows zählt sie getrennt, der Task-Manager fasst sie zu einem Wert zusammen. Ein Mauszeiger über den Chips oben erklärt die einzelnen Typen.',
+    },
+    {
+        key: 'gpuMem', label: 'VRAM', align: 'right', text: row => formatBytes(row.gpuMem),
+        help: 'Grafikspeicher, den dieser Prozess auf der Karte belegt (Zähler "GPU Process Memory / Local Usage").',
+    },
+    {
+        key: 'rx', label: '↓ Download', align: 'right', text: row => formatRate(row.rx),
+        help: 'Empfangene Bytes pro Sekunde, aus einer Kernel-ETW-Sitzung (TCP und UDP). Läuft nur, solange dieses Fenster offen ist.',
+    },
+    {
+        key: 'tx', label: '↑ Upload', align: 'right', text: row => formatRate(row.tx),
+        help: 'Gesendete Bytes pro Sekunde, aus einer Kernel-ETW-Sitzung (TCP und UDP).',
+    },
+    {
+        key: 'ioRead', label: 'E/A lesen', align: 'right', text: row => formatRate(row.ioRead),
+        help: 'Gelesene Bytes pro Sekunde über alle Ein-/Ausgabekanäle — Dateien, Netzwerk und Geräte zusammen. Nicht ausschließlich Datenträgerzugriff; der reine Datenträgerdurchsatz steht in der Kachel oben.',
+    },
+    {
+        key: 'ioWrite', label: 'E/A schreiben', align: 'right', text: row => formatRate(row.ioWrite),
+        help: 'Geschriebene Bytes pro Sekunde über alle Ein-/Ausgabekanäle — Dateien, Netzwerk und Geräte zusammen.',
+    },
+    {
+        key: 'services', label: 'Dienste', align: 'left', text: row => (row.services || []).join(', ') || '–',
+        help: 'Windows-Dienste, die in diesem Prozess laufen. Löst "Diensthost: lokales System" zu den konkret laufenden Diensten auf.',
+    },
+    {
+        key: 'path', label: 'Datei', align: 'left', text: row => row.path || '–',
+        help: 'Vollständiger Pfad der ausgeführten Datei. Bei Systemprozessen ohne Leserechte bleibt die Spalte leer.',
+    },
+    {
+        key: 'note', label: 'Notiz', align: 'left', text: row => notes[row.name] || '',
+        help: 'Eigene Notiz zum Prozess. Doppelklick zum Bearbeiten. Die Notiz hängt am Prozessnamen und bleibt über Neustarts erhalten.',
+    },
 ];
 
 const state = {
@@ -76,6 +148,7 @@ const state = {
     onlyActive: false,
     pinned: new Set(),
     editing: null,
+    view: 'processes',
 };
 
 function loadJson(key, fallback) {
@@ -88,6 +161,7 @@ function loadJson(key, fallback) {
 
 const notes = loadJson(STORAGE_NOTES, {});
 const hiddenColumns = new Set(loadJson(STORAGE_COLUMNS, COLUMNS.filter(c => c.off).map(c => c.key)));
+const dismissedNotices = new Set(loadJson(STORAGE_NOTICES, []));
 
 function activeColumns() {
     return COLUMNS.filter(column => column.locked || !hiddenColumns.has(column.key));
@@ -101,8 +175,12 @@ function saveNotes() {
     localStorage.setItem(STORAGE_NOTES, JSON.stringify(notes));
 }
 
+function saveDismissed() {
+    localStorage.setItem(STORAGE_NOTICES, JSON.stringify([...dismissedNotices]));
+}
+
 const elements = {
-    notice: document.getElementById('notice'),
+    notices: document.getElementById('notices'),
     cpuPercent: document.getElementById('cpu-percent'),
     cpuSub: document.getElementById('cpu-sub'),
     cpuCores: document.getElementById('cpu-cores'),
@@ -115,12 +193,16 @@ const elements = {
     netRx: document.getElementById('net-rx'),
     netRxUnit: document.getElementById('net-rx-unit'),
     netSub: document.getElementById('net-sub'),
+    diskBusy: document.getElementById('disk-busy'),
+    diskSub: document.getElementById('disk-sub'),
     chart: document.getElementById('history'),
     headRow: document.getElementById('head-row'),
     tbody: document.querySelector('#processes tbody'),
     status: document.getElementById('status'),
     columnsButton: document.getElementById('columns-button'),
     columnsMenu: document.getElementById('columns-menu'),
+    systemGroups: document.getElementById('system-groups'),
+    systemDrives: document.getElementById('system-drives'),
 };
 
 // ---------- Kacheln ----------
@@ -162,6 +244,15 @@ function renderTiles(data) {
     elements.netSub.textContent = data.net.available
         ? `${formatRate(data.net.tx)} Upload`
         : 'Netz-Zähler nicht verfügbar';
+
+    if (data.disk.available) {
+        elements.diskBusy.textContent = nf0.format(data.disk.busyPercent);
+        elements.diskSub.textContent =
+            `${formatRate(data.disk.read)} lesen  ·  ${formatRate(data.disk.write)} schreiben`;
+    } else {
+        elements.diskBusy.textContent = '–';
+        elements.diskSub.textContent = 'Datenträger-Zähler nicht verfügbar';
+    }
 }
 
 function renderCores(cores) {
@@ -181,24 +272,85 @@ function renderEngines(byEngineType) {
         const chip = document.createElement('span');
         chip.className = 'chip';
         chip.textContent = `${name} ${nf1.format(value)} %`;
+        chip.title = engineTooltip(name);
         return chip;
     }));
 }
 
-function renderNotice(diag) {
-    const messages = [];
+// ---------- Meldungen ----------
+
+function noticesFor(diag) {
+    const list = [];
+    const add = (id, text) => list.push({ id, text });
+
     if (diag.cpuSensorsBlocked) {
-        messages.push(
-            'CPU-Temperatur, -Takt und -Leistung sind nicht lesbar: der Sensor-Treiber ' +
-            'WinRing0 wird von der Speicherintegrität und der Sperrliste für verwundbare ' +
-            'Treiber blockiert. GPU-Werte kommen über NVAPI und sind davon nicht betroffen.');
+        add('cpu-sensors',
+            'CPU-Temperatur, -Takt und -Leistung sind nicht lesbar: der Sensor-Treiber WinRing0 ' +
+            'wird von der Speicherintegrität und der Sperrliste für verwundbare Treiber blockiert. ' +
+            'GPU-Werte kommen über NVAPI und sind davon nicht betroffen.');
+    }
+    if (diag.gpuCountersMissing) {
+        add('gpu-counters',
+            'Der Zählersatz "GPU Engine" fehlt — vermutlich eine Treiberkonstellation, die ihn nicht ' +
+            'registriert. GPU-Last und die Engine-Aufschlüsselung bleiben leer.');
+    }
+    if (diag.networkCountersMissing) {
+        add('net-counters',
+            'Der Zählersatz "Network Interface" fehlt. Der Gesamtdurchsatz des Netzwerks kann nicht ' +
+            'ermittelt werden.');
+    }
+    if (diag.diskCountersMissing) {
+        add('disk-counters',
+            'Der Zählersatz "PhysicalDisk" fehlt. Der Datenträgerdurchsatz kann nicht ermittelt werden.');
+    }
+    if (diag.processCountersMissing) {
+        add('process-counters',
+            'Weder "Process V2" noch "Process" liefern Zähler — die Prozessliste bleibt leer.');
+    }
+    if (diag.legacyProcessCounters) {
+        add('legacy-process-counters',
+            'Der Zählersatz "Process V2" fehlt; es wird der ältere "Process" verwendet. Gleichnamige ' +
+            'Prozesse teilen sich dort eine Zählerinstanz, einzelne Werte können dadurch ungenau sein.');
     }
     if (diag.networkTraceError) {
-        messages.push(`Netzverkehr pro Prozess nicht verfügbar: ${diag.networkTraceError}`);
+        add('net-trace', `Netzverkehr pro Prozess nicht verfügbar: ${diag.networkTraceError}`);
     }
 
-    elements.notice.hidden = messages.length === 0;
-    elements.notice.textContent = messages.join('  ');
+    return list;
+}
+
+function renderNotices(diag) {
+    const wanted = noticesFor(diag).filter(notice => !dismissedNotices.has(notice.id));
+    const shown = [...elements.notices.children].map(node => node.dataset.id);
+
+    // Nur neu aufbauen, wenn sich wirklich etwas geändert hat — sonst flackert
+    // die Leiste im Sekundentakt.
+    if (shown.length === wanted.length && wanted.every((notice, i) => notice.id === shown[i])) {
+        return;
+    }
+
+    elements.notices.replaceChildren(...wanted.map(notice => {
+        const box = document.createElement('p');
+        box.className = 'notice';
+        box.dataset.id = notice.id;
+
+        const text = document.createElement('span');
+        text.textContent = notice.text;
+
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'notice-close';
+        close.textContent = '✕';
+        close.title = 'Meldung dauerhaft ausblenden';
+        close.addEventListener('click', () => {
+            dismissedNotices.add(notice.id);
+            saveDismissed();
+            box.remove();
+        });
+
+        box.append(text, close);
+        return box;
+    }));
 }
 
 // ---------- Verlaufsdiagramm ----------
@@ -209,6 +361,10 @@ function drawChart() {
     const ratio = window.devicePixelRatio || 1;
     const width = canvas.clientWidth;
     const height = canvas.clientHeight;
+
+    if (width === 0 || height === 0) {
+        return;
+    }
 
     if (canvas.width !== width * ratio || canvas.height !== height * ratio) {
         canvas.width = width * ratio;
@@ -286,8 +442,8 @@ function aggregateTree(processes) {
         if (!group) {
             group = {
                 pid: root.pid, parentPid: null, name: root.name, description: root.description,
-                cpu: 0, ws: 0, priv: 0, gpu: 0, gpuEngines: {}, gpuMem: 0,
-                rx: 0, tx: 0, services: [], children: 0,
+                path: root.path, cpu: 0, ws: 0, priv: 0, gpu: 0, gpuEngines: {}, gpuMem: 0,
+                rx: 0, tx: 0, ioRead: 0, ioWrite: 0, services: [], children: 0,
             };
             groups.set(root.pid, group);
         }
@@ -298,6 +454,8 @@ function aggregateTree(processes) {
         group.gpuMem += process.gpuMem;
         group.rx += process.rx || 0;
         group.tx += process.tx || 0;
+        group.ioRead += process.ioRead || 0;
+        group.ioWrite += process.ioWrite || 0;
         for (const [engine, value] of Object.entries(process.gpuEngines || {})) {
             group.gpuEngines[engine] = (group.gpuEngines[engine] || 0) + value;
         }
@@ -327,6 +485,7 @@ function aggregateTree(processes) {
 function matchesFilter(row, needle) {
     return row.name.toLowerCase().includes(needle)
         || (row.description || '').toLowerCase().includes(needle)
+        || (row.path || '').toLowerCase().includes(needle)
         || (notes[row.name] || '').toLowerCase().includes(needle)
         || (row.services || []).some(service => service.toLowerCase().includes(needle))
         || String(row.pid) === needle;
@@ -336,6 +495,8 @@ function compare(a, b, key) {
     switch (key) {
         case 'name':
             return a.name.localeCompare(b.name, 'de');
+        case 'path':
+            return (a.path || '').localeCompare(b.path || '', 'de');
         case 'note':
             return (notes[a.name] || '').localeCompare(notes[b.name] || '', 'de');
         case 'services':
@@ -384,12 +545,12 @@ function visibleRows() {
 const rowCache = new Map();
 
 function renderHead() {
-    const columns = activeColumns();
-    const cells = columns.map(column => {
+    const cells = activeColumns().map(column => {
         const th = document.createElement('th');
         th.textContent = column.label;
         th.dataset.sort = column.key;
         th.className = column.align === 'right' ? 'num' : '';
+        th.title = `${column.help}\n\nKlick sortiert nach dieser Spalte.`;
         if (state.sortKey === column.key) {
             th.classList.add(state.sortAsc ? 'sorted-asc' : 'sorted-desc');
         }
@@ -442,19 +603,16 @@ function rowElement(row, columns) {
 
     for (const column of columns) {
         const td = entry.cells.get(column.key);
-        if (!td) {
-            continue;
-        }
-        if (column.key === 'note' && state.editing === row.pid) {
+        if (!td || (column.key === 'note' && state.editing === row.pid)) {
             continue;
         }
 
-        const text = column.text(row);
         const className =
             (column.align === 'right' ? 'num' : '') +
             (column.load ? loadClass(row[column.key]) : '') +
             (column.key === 'services' && (row.services || []).length ? ' services' : '') +
             (column.key === 'engines' ? ' engine-list' : '') +
+            (column.key === 'path' ? ' path' : '') +
             (column.key === 'note' ? ' note' : '');
 
         if (td.className !== className.trim()) {
@@ -463,9 +621,14 @@ function rowElement(row, columns) {
 
         if (column.key === 'name') {
             renderNameCell(td, row);
-        } else if (td.textContent !== text) {
-            td.textContent = text;
-            td.title = text;
+        } else if (column.key === 'note') {
+            renderNoteCell(td, row);
+        } else {
+            const text = column.text(row);
+            if (td.textContent !== text) {
+                td.textContent = text;
+                td.title = text;
+            }
         }
     }
 
@@ -504,6 +667,31 @@ function renderNameCell(td, row) {
 
     td.replaceChildren(wrap);
     td.title = row.description ? `${row.name} — ${row.description}` : row.name;
+}
+
+/** Die Notizzelle trägt immer einen Stift, damit erkennbar ist, dass man hier schreiben kann. */
+function renderNoteCell(td, row) {
+    const value = notes[row.name] || '';
+    if (td.dataset.note === value) {
+        return;
+    }
+    td.dataset.note = value;
+
+    const pencil = document.createElement('span');
+    pencil.className = 'note-pencil';
+    pencil.textContent = '✎';
+
+    const text = document.createElement('span');
+    text.className = 'note-text';
+    text.textContent = value || 'Notiz …';
+    if (!value) {
+        text.classList.add('empty');
+    }
+
+    td.replaceChildren(pencil, text);
+    td.title = value
+        ? `${value}\n\nDoppelklick zum Bearbeiten.`
+        : `Doppelklick, um eine Notiz zu ${row.name} zu hinterlegen.`;
 }
 
 function renderTable() {
@@ -570,11 +758,9 @@ elements.tbody.addEventListener('dblclick', event => {
     const pid = Number(tr.dataset.pid);
     const row = state.processes.find(p => p.pid === pid)
         || aggregateTree(state.processes).find(p => p.pid === pid);
-    if (!row) {
-        return;
+    if (row) {
+        startEditingNote(td, pid, row.name);
     }
-
-    startEditingNote(td, pid, row.name);
 });
 
 function startEditingNote(td, pid, name) {
@@ -605,7 +791,7 @@ function startEditingNote(td, pid, name) {
             saveNotes();
         }
 
-        td.textContent = notes[name] || '';
+        delete td.dataset.note;
         renderTable();
     };
 
@@ -628,6 +814,8 @@ function startEditingNote(td, pid, name) {
 function buildColumnsMenu() {
     const items = COLUMNS.filter(column => !column.locked).map(column => {
         const label = document.createElement('label');
+        label.title = column.help;
+
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.checked = !hiddenColumns.has(column.key);
@@ -642,6 +830,7 @@ function buildColumnsMenu() {
             renderHead();
             renderTable();
         });
+
         label.append(checkbox, document.createTextNode(column.label));
         return label;
     });
@@ -659,6 +848,104 @@ document.addEventListener('click', () => {
 });
 
 elements.columnsMenu.addEventListener('click', event => event.stopPropagation());
+
+// ---------- Systemübersicht ----------
+
+function renderSystemInfo(data) {
+    elements.systemGroups.replaceChildren(...(data.groups || []).map(group => {
+        const card = document.createElement('section');
+        card.className = 'info-card';
+
+        const title = document.createElement('h4');
+        title.textContent = group.title;
+        card.append(title);
+
+        const list = document.createElement('dl');
+        for (const item of group.items) {
+            const label = document.createElement('dt');
+            label.textContent = item.label;
+            const value = document.createElement('dd');
+            value.textContent = item.value;
+            value.title = item.value;
+            list.append(label, value);
+        }
+
+        card.append(list);
+        return card;
+    }));
+
+    elements.systemDrives.replaceChildren(...(data.drives || []).map(drive => {
+        const card = document.createElement('section');
+        card.className = 'info-card';
+
+        const title = document.createElement('h4');
+        title.textContent = drive.model;
+        card.append(title);
+
+        const meta = document.createElement('p');
+        meta.className = 'drive-meta';
+        meta.textContent = [
+            drive.sizeBytes > 0 ? `${nf0.format(drive.sizeBytes / 1000000000)} GB` : null,
+            drive.interfaceType,
+            drive.mediaType,
+        ].filter(Boolean).join('  ·  ');
+        card.append(meta);
+
+        for (const volume of drive.volumes) {
+            const row = document.createElement('div');
+            row.className = 'volume';
+
+            const head = document.createElement('div');
+            head.className = 'volume-head';
+            head.textContent = volume.label ? `${volume.name}  ${volume.label}` : volume.name;
+
+            const size = document.createElement('span');
+            size.className = 'volume-size';
+            size.textContent = `${formatBytes(volume.usedBytes)} / ${formatBytes(volume.totalBytes)}`;
+            head.append(size);
+
+            const bar = document.createElement('div');
+            bar.className = 'volume-bar';
+            const fill = document.createElement('i');
+            fill.style.width = `${volume.usedPercent}%`;
+            if (volume.usedPercent >= 90) {
+                fill.classList.add('full');
+            } else if (volume.usedPercent >= 75) {
+                fill.classList.add('high');
+            }
+            bar.append(fill);
+
+            const foot = document.createElement('div');
+            foot.className = 'volume-foot';
+            foot.textContent =
+                `${nf0.format(volume.usedPercent)} % belegt  ·  ${formatBytes(volume.freeBytes)} frei  ·  ${volume.fileSystem}`;
+
+            row.append(head, bar, foot);
+            card.append(row);
+        }
+
+        return card;
+    }));
+}
+
+// ---------- Ansichten ----------
+
+for (const tab of document.querySelectorAll('.tab')) {
+    tab.addEventListener('click', () => {
+        state.view = tab.dataset.view;
+        for (const other of document.querySelectorAll('.tab')) {
+            other.classList.toggle('active', other === tab);
+        }
+        document.getElementById('view-processes').hidden = state.view !== 'processes';
+        document.getElementById('view-system').hidden = state.view !== 'system';
+
+        // Das Canvas hat im ausgeblendeten Zustand die Größe 0 und muss nach dem
+        // Einblenden neu gezeichnet werden.
+        if (state.view === 'processes') {
+            drawChart();
+        }
+    });
+}
 
 // ---------- Bedienelemente ----------
 
@@ -688,14 +975,25 @@ renderHead();
 if (host) {
     host.addEventListener('message', event => {
         const data = event.data;
-        if (!data || data.type !== 'detail') {
+        if (!data) {
+            return;
+        }
+
+        if (data.type === 'system') {
+            renderSystemInfo(data);
+            return;
+        }
+
+        if (data.type !== 'detail') {
             return;
         }
 
         renderTiles(data);
-        renderNotice(data.diag || {});
+        renderNotices(data.diag || {});
         state.history = data.history;
-        drawChart();
+        if (state.view === 'processes') {
+            drawChart();
+        }
 
         // processes ist null, wenn sich seit dem letzten Takt nichts geändert hat.
         if (data.processes) {

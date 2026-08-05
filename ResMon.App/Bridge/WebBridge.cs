@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using ResMon.Core.Config;
+using ResMon.Core.Inventory;
 using ResMon.Core.Model;
 
 namespace ResMon.App.Bridge;
@@ -9,7 +10,14 @@ namespace ResMon.App.Bridge;
 /// Zustandsmeldungen, die das Detailfenster als Hinweis anzeigt — etwa wenn die
 /// CPU-Sensoren durch einen blockierten Kernel-Treiber ausfallen.
 /// </summary>
-public readonly record struct HostDiagnostics(bool CpuSensorsBlocked, string? NetworkTraceError);
+public readonly record struct HostDiagnostics(
+    bool CpuSensorsBlocked,
+    bool GpuCountersMissing,
+    bool NetworkCountersMissing,
+    bool DiskCountersMissing,
+    bool ProcessCountersMissing,
+    bool LegacyProcessCounters,
+    string? NetworkTraceError);
 
 /// <summary>Ein von der Oberfläche gesendetes Kommando (DESIGN.md §12).</summary>
 public sealed class WebCommand
@@ -82,12 +90,20 @@ public static class WebBridge
                 rx = Round(snapshot.Network.ReceivedBytesPerSec, 0),
                 tx = Round(snapshot.Network.SentBytesPerSec, 0),
             },
+            disk = new
+            {
+                available = snapshot.Disk.Available,
+                read = Round(snapshot.Disk.ReadBytesPerSec, 0),
+                write = Round(snapshot.Disk.WriteBytesPerSec, 0),
+                busyPercent = Round(snapshot.Disk.BusyPercent),
+            },
             visible = new
             {
                 cpu = visible.Cpu,
                 gpu = visible.Gpu,
                 ram = visible.Ram,
                 net = visible.Net,
+                disk = visible.Disk,
                 temps = visible.Temps,
             },
             history = new
@@ -95,9 +111,10 @@ public static class WebBridge
                 cpu = Series(history, OverlayHistoryPoints, s => s.CpuPercent),
                 gpu = Series(history, OverlayHistoryPoints, s => s.GpuPercent),
                 ram = Series(history, OverlayHistoryPoints, s => s.MemoryPercent),
-                // Netzraten haben keine feste Obergrenze — die Sparkline skaliert
-                // sich in JavaScript auf ihr eigenes Maximum.
-                net = Series(history, OverlayHistoryPoints, s => s.NetReceivedBytesPerSec + s.NetSentBytesPerSec),
+                // Netz- und Datenträgerraten haben keine feste Obergrenze — die
+                // Sparklines skalieren sich in JavaScript auf ihr eigenes Maximum.
+                net = Series(history, OverlayHistoryPoints, s => s.NetReceivedBytesPerSec + s.NetSentBytesPerSec, digits: 0),
+                disk = Series(history, OverlayHistoryPoints, s => s.DiskReadBytesPerSec + s.DiskWriteBytesPerSec, digits: 0),
             },
         };
 
@@ -154,9 +171,21 @@ public static class WebBridge
                 rx = Round(snapshot.Network.ReceivedBytesPerSec, 0),
                 tx = Round(snapshot.Network.SentBytesPerSec, 0),
             },
+            disk = new
+            {
+                available = snapshot.Disk.Available,
+                read = Round(snapshot.Disk.ReadBytesPerSec, 0),
+                write = Round(snapshot.Disk.WriteBytesPerSec, 0),
+                busyPercent = Round(snapshot.Disk.BusyPercent),
+            },
             diag = new
             {
                 cpuSensorsBlocked = diagnostics.CpuSensorsBlocked,
+                gpuCountersMissing = diagnostics.GpuCountersMissing,
+                networkCountersMissing = diagnostics.NetworkCountersMissing,
+                diskCountersMissing = diagnostics.DiskCountersMissing,
+                processCountersMissing = diagnostics.ProcessCountersMissing,
+                legacyProcessCounters = diagnostics.LegacyProcessCounters,
                 networkTraceError = diagnostics.NetworkTraceError,
             },
             history = new
@@ -164,8 +193,6 @@ public static class WebBridge
                 cpu = Series(history, history.Length, s => s.CpuPercent),
                 gpu = Series(history, history.Length, s => s.GpuPercent),
                 ram = Series(history, history.Length, s => s.MemoryPercent),
-                netRx = Series(history, history.Length, s => s.NetReceivedBytesPerSec, digits: 0),
-                netTx = Series(history, history.Length, s => s.NetSentBytesPerSec, digits: 0),
                 seconds = history.Length,
             },
             processes = processes?.Select(p => new
@@ -185,7 +212,43 @@ public static class WebBridge
                 services = p.ServiceNames,
                 rx = Round(p.NetReceivedBytesPerSec, 0),
                 tx = Round(p.NetSentBytesPerSec, 0),
+                ioRead = Round(p.IoReadBytesPerSec, 0),
+                ioWrite = Round(p.IoWriteBytesPerSec, 0),
+                path = p.ImagePath,
             }).ToArray(),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>Die Systemübersicht wird einmalig gesendet — sie ändert sich nicht.</summary>
+    public static string BuildSystemPayload(SystemInfo info)
+    {
+        var payload = new
+        {
+            type = "system",
+            groups = info.Groups.Select(group => new
+            {
+                title = group.Title,
+                items = group.Items.Select(item => new { label = item.Label, value = item.Value }),
+            }),
+            drives = info.Drives.Select(drive => new
+            {
+                model = drive.Model,
+                interfaceType = drive.InterfaceType,
+                mediaType = drive.MediaType,
+                sizeBytes = drive.SizeBytes,
+                volumes = drive.Volumes.Select(volume => new
+                {
+                    name = volume.Name,
+                    label = volume.Label,
+                    fileSystem = volume.FileSystem,
+                    totalBytes = volume.TotalBytes,
+                    freeBytes = volume.FreeBytes,
+                    usedBytes = volume.UsedBytes,
+                    usedPercent = Round(volume.UsedPercent),
+                }),
+            }),
         };
 
         return JsonSerializer.Serialize(payload, Options);

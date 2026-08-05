@@ -4,7 +4,7 @@
 
 const host = window.chrome && window.chrome.webview;
 
-const COLORS = { cpu: '#60a5fa', gpu: '#4ade80', ram: '#fb923c', net: '#a78bfa' };
+const COLORS = { cpu: '#60a5fa', gpu: '#4ade80', ram: '#fb923c', net: '#a78bfa', disk: '#22d3ee' };
 
 const rows = {};
 for (const element of document.querySelectorAll('.row')) {
@@ -138,6 +138,20 @@ function updateRow(key, percent, temp, showTemps, visible, available = true) {
     row.temp.hidden = label === '';
 }
 
+/** Zeilen ohne Prozentwert: zwei Raten und eine selbstskalierende Sparkline. */
+function updateRateRow(key, visible, available, first, second, history) {
+    const row = rows[key];
+    row.root.hidden = !visible;
+    if (!visible) {
+        return;
+    }
+
+    row.root.classList.toggle('stale', !available);
+    row.down.textContent = formatRate(first);
+    row.up.textContent = formatRate(second);
+    drawSparkline(row.spark, history, COLORS[key], Math.max(...history, 1));
+}
+
 function render(data) {
     const showTemps = data.visible.temps;
 
@@ -145,14 +159,8 @@ function render(data) {
     updateRow('gpu', data.gpu.percent, data.gpu.tempC, showTemps, data.visible.gpu, data.gpu.available);
     updateRow('ram', data.ram.percent, null, false, data.visible.ram);
 
-    const net = rows.net;
-    net.root.hidden = !data.visible.net;
-    if (data.visible.net) {
-        net.root.classList.toggle('stale', !data.net.available);
-        net.down.textContent = formatRate(data.net.rx);
-        net.up.textContent = formatRate(data.net.tx);
-        drawSparkline(net.spark, data.history.net, COLORS.net, Math.max(...data.history.net, 1));
-    }
+    updateRateRow('net', data.visible.net, data.net.available, data.net.rx, data.net.tx, data.history.net);
+    updateRateRow('disk', data.visible.disk, data.disk.available, data.disk.read, data.disk.write, data.history.disk);
 
     drawSparkline(rows.cpu.spark, data.history.cpu, COLORS.cpu);
     drawSparkline(rows.gpu.spark, data.history.gpu, COLORS.gpu);

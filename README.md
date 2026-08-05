@@ -47,11 +47,16 @@ Tray-Icon. Bedienung:
 
 Im Detailfenster:
 
+- **Reiter Prozesse / System** — Prozesstabelle oder Übersicht über Betriebssystem,
+  CPU, Grafik, Arbeitsspeicher, Mainboard und die Datenträger samt Laufwerken
 - **Klick auf eine Zeile** heftet den Prozess oben an. Angeheftete Zeilen bleiben
   dort stehen, überstehen den Filter und wandern beim Sortieren nicht mehr
-- **Doppelklick auf die Notizspalte** öffnet ein Eingabefeld. Notizen hängen am
-  Prozessnamen und bleiben über Neustarts erhalten
+- **Doppelklick auf die Notizspalte** (Stiftsymbol) öffnet ein Eingabefeld.
+  Notizen hängen am Prozessnamen und bleiben über Neustarts erhalten
 - **Spalten ▾** blendet Spalten ein und aus
+- **Mauszeiger über einer Spaltenüberschrift** erklärt, was der Wert bedeutet;
+  dasselbe gilt für die GPU-Engine-Chips in der GPU-Kachel
+- Meldungen über fehlende Zähler lassen sich per ✕ dauerhaft ausblenden
 
 Einstellungen liegen in `%AppData%\ResMon\settings.json`. Spaltenauswahl und
 Notizen liegen im `localStorage` der WebView unter
@@ -112,11 +117,21 @@ Die Speicherintegrität abzuschalten würde die Temperaturanzeige aktivieren,
 senkt aber das Schutzniveau des Systems spürbar. Das ist eine bewusste
 Abwägung — ResMon nimmt sie niemandem ab.
 
-## Netzwerk
+## Netzwerk und Datenträger
 
-Der Gesamtdurchsatz kommt aus `\Network Interface` über PDH und ist immer
-verfügbar. Der Durchsatz **pro Prozess** stammt aus einer Kernel-ETW-Sitzung
+Der Netz-Gesamtdurchsatz kommt aus `\Network Interface` über PDH, der
+Datenträgerdurchsatz aus `\PhysicalDisk(_Total)`. Beides ist immer verfügbar.
+
+Der Netzdurchsatz **pro Prozess** stammt aus einer Kernel-ETW-Sitzung
 (`Microsoft.Diagnostics.Tracing.TraceEvent`, Keyword `NetworkTCPIP`) — PDH kennt
 dafür keine Zähler. Die Sitzung läuft nur, solange das Detailfenster offen ist,
 und erfordert Administratorrechte. Ohne sie bleiben die Spalten leer und das
 Detailfenster nennt den Grund.
+
+Die Spalten **E/A lesen** und **E/A schreiben** stammen dagegen aus
+`\Process V2(*)\IO Read Bytes/sec` bzw. `IO Write Bytes/sec`. Diese Zähler
+umfassen *alle* Ein- und Ausgaben eines Prozesses — Dateien, Netzwerk und Geräte
+zusammen —, sind also nicht deckungsgleich mit dem reinen Datenträgerzugriff.
+Sie sind dafür immer korrekt dem verursachenden Prozess zugeordnet, was für
+Datenträger-Ereignisse aus ETW nicht durchgängig gilt. Der reine
+Datenträgerdurchsatz steht in der Kachel oben.

@@ -132,6 +132,9 @@ button:hover {
     color: var(--ram);
 }
 
+.row[data-metric="disk"] .rate.down::before { content: "R "; }
+.row[data-metric="disk"] .rate.up::before { content: "W "; }
+
 .row.stale .value,
 .row.stale .label {
     opacity: 0.35;

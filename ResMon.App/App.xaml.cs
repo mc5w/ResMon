@@ -73,6 +73,11 @@ public partial class App : Application
             _overlay?.Push(snapshot, history);
             _detail?.Push(snapshot, history, new HostDiagnostics(
                 _collector.CpuSensorsBlocked,
+                GpuCountersMissing: !_collector.GpuCountersAvailable,
+                NetworkCountersMissing: !_collector.NetworkCountersAvailable,
+                DiskCountersMissing: !_collector.DiskCountersAvailable,
+                ProcessCountersMissing: !_collector.ProcessCountersAvailable,
+                _collector.UsesLegacyProcessCounters,
                 _collector.NetworkTraceError));
         });
     }
@@ -92,7 +97,16 @@ public partial class App : Application
             };
 
             if (_collector is not null)
+            {
                 _collector.ProcessSamplingEnabled = true;
+
+                // Beim ersten Öffnen läuft die WMI-Abfrage womöglich noch; das
+                // Fenster holt sie sich nach, sobald sie fertig ist.
+                DetailWindow target = _detail;
+                _ = _collector.SystemInfoReady.ContinueWith(
+                    task => Dispatcher.BeginInvoke(() => target.PushSystemInfo(task.Result)),
+                    TaskContinuationOptions.OnlyOnRanToCompletion);
+            }
 
             _detail.Show();
             return;

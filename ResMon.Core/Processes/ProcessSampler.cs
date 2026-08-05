@@ -20,6 +20,8 @@ public sealed class ProcessSampler : IDisposable
     private const string CpuPath = @"\Process V2(*)\% Processor Time";
     private const string WorkingSetPath = @"\Process V2(*)\Working Set - Private";
     private const string PrivateBytesPath = @"\Process V2(*)\Private Bytes";
+    private const string IoReadPath = @"\Process V2(*)\IO Read Bytes/sec";
+    private const string IoWritePath = @"\Process V2(*)\IO Write Bytes/sec";
 
     // "Process V2" heißt der PID-Zähler "Process ID"; im älteren Satz "ID Process".
     // Beide Schreibweisen probieren, weil sich das zwischen Windows-Builds unterscheidet.
@@ -34,6 +36,8 @@ public sealed class ProcessSampler : IDisposable
     private const string LegacyPidPath = @"\Process(*)\ID Process";
     private const string LegacyWorkingSetPath = @"\Process(*)\Working Set - Private";
     private const string LegacyPrivateBytesPath = @"\Process(*)\Private Bytes";
+    private const string LegacyIoReadPath = @"\Process(*)\IO Read Bytes/sec";
+    private const string LegacyIoWritePath = @"\Process(*)\IO Write Bytes/sec";
 
     private static readonly IReadOnlyDictionary<string, double> NoEngines =
         new Dictionary<string, double>(StringComparer.Ordinal);
@@ -47,6 +51,8 @@ public sealed class ProcessSampler : IDisposable
     private readonly PdhCounter? _pid;
     private readonly PdhCounter? _workingSet;
     private readonly PdhCounter? _privateBytes;
+    private readonly PdhCounter? _ioRead;
+    private readonly PdhCounter? _ioWrite;
 
     public ProcessSampler(ServiceResolver services)
     {
@@ -64,6 +70,8 @@ public sealed class ProcessSampler : IDisposable
 
             _workingSet = _query.TryAddCounter(WorkingSetPath);
             _privateBytes = _query.TryAddCounter(PrivateBytesPath);
+            _ioRead = _query.TryAddCounter(IoReadPath);
+            _ioWrite = _query.TryAddCounter(IoWritePath);
         }
 
         if (_cpu is null || _pid is null)
@@ -73,6 +81,8 @@ public sealed class ProcessSampler : IDisposable
             _pid = _query.TryAddCounter(LegacyPidPath);
             _workingSet = _query.TryAddCounter(LegacyWorkingSetPath);
             _privateBytes = _query.TryAddCounter(LegacyPrivateBytesPath);
+            _ioRead = _query.TryAddCounter(LegacyIoReadPath);
+            _ioWrite = _query.TryAddCounter(LegacyIoWritePath);
         }
     }
 
@@ -119,6 +129,8 @@ public sealed class ProcessSampler : IDisposable
 
         var workingSet = ReadByInstance(_workingSet);
         var privateBytes = ReadByInstance(_privateBytes);
+        var ioRead = ReadRateByInstance(_ioRead);
+        var ioWrite = ReadRateByInstance(_ioWrite);
         Dictionary<int, ProcessTreeEntry> tree = Toolhelp.Snapshot();
         LivePids = tree.Keys.ToHashSet();
         _descriptions.Prune(LivePids);
@@ -153,10 +165,25 @@ public sealed class ProcessSampler : IDisposable
                 gpu?.MemBytes ?? 0,
                 _services.ForPid(pid),
                 network.ReceivedBytesPerSec,
-                network.SentBytesPerSec));
+                network.SentBytesPerSec,
+                ioRead.GetValueOrDefault(cpu.Instance),
+                ioWrite.GetValueOrDefault(cpu.Instance),
+                _descriptions.GetPath(pid)));
         }
 
         return samples;
+    }
+
+    /// <summary>Wie <see cref="ReadByInstance"/>, aber für ratenbasierte Zähler.</summary>
+    private static Dictionary<string, double> ReadRateByInstance(PdhCounter? counter)
+    {
+        var result = new Dictionary<string, double>(StringComparer.Ordinal);
+        if (counter is null)
+            return result;
+
+        foreach (PdhInstanceValue entry in counter.ReadArrayDouble(noCap100: true))
+            result[entry.Instance] = Math.Max(0, entry.Value);
+        return result;
     }
 
     private static Dictionary<string, long> ReadByInstance(PdhCounter? counter)
@@ -196,35 +223,39 @@ public sealed class ProcessSampler : IDisposable
     /// </summary>
     private sealed class DescriptionCache
     {
-        private readonly Dictionary<int, string?> _byPid = [];
-        private readonly Dictionary<string, string?> _byPath = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<int, Entry> _byPid = [];
+        private readonly Dictionary<string, string?> _descriptionByPath = new(StringComparer.OrdinalIgnoreCase);
 
-        public string? Get(int pid)
+        private readonly record struct Entry(string? Path, string? Description);
+
+        public string? Get(int pid) => Resolve(pid).Description;
+
+        public string? GetPath(int pid) => Resolve(pid).Path;
+
+        private Entry Resolve(int pid)
         {
-            if (_byPid.TryGetValue(pid, out string? cached))
+            if (_byPid.TryGetValue(pid, out Entry cached))
                 return cached;
 
             string? description = null;
             string? path = TryGetImagePath(pid);
-            if (path is not null)
+            if (path is not null && !_descriptionByPath.TryGetValue(path, out description))
             {
-                if (!_byPath.TryGetValue(path, out description))
+                try
                 {
-                    try
-                    {
-                        description = FileVersionInfo.GetVersionInfo(path).FileDescription;
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        description = null;
-                    }
-
-                    _byPath[path] = description;
+                    description = FileVersionInfo.GetVersionInfo(path).FileDescription;
                 }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    description = null;
+                }
+
+                _descriptionByPath[path] = description;
             }
 
-            _byPid[pid] = description;
-            return description;
+            var entry = new Entry(path, description);
+            _byPid[pid] = entry;
+            return entry;
         }
 
         /// <summary>Entfernt Einträge beendeter Prozesse, damit der Cache nicht unbegrenzt wächst.</summary>
