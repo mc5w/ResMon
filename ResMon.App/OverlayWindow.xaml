@@ -6,13 +6,21 @@
         Width="240" Height="172"
         WindowStyle="None"
         AllowsTransparency="True"
-        Background="Transparent"
+        Background="#01000000"
         Topmost="True"
         ShowInTaskbar="False"
         ResizeMode="NoResize"
         WindowStartupLocation="Manual"
         UseLayoutRounding="True"
         SnapsToDevicePixels="True">
+
+    <!-- Background ist bewusst #01000000 und nicht "Transparent":
+         AllowsTransparency macht das Fenster zum Layered Window, und die WebView2
+         ist ein eigener Child-HWND, der nicht in dessen Bitmap eingeht. Die
+         WPF-Fläche darunter hätte damit überall Alpha 0 — Windows verwirft
+         Mausklicks auf vollständig transparenten Pixeln, das Overlay wäre
+         sichtbar, aber weder zieh- noch klickbar. Alpha 1/255 ist optisch nicht
+         wahrnehmbar und stellt das Hit-Testing wieder her. -->
     <Grid>
         <wv2:WebView2 x:Name="Web" />
     </Grid>

@@ -101,7 +101,9 @@ public partial class OverlayWindow : Window
         switch (command?.Cmd)
         {
             case "drag":
-                BeginDrag();
+                // WebView2 fängt die Mausereignisse ab; die Kopfzeile meldet den
+                // Ziehbeginn deshalb per Nachricht (DESIGN.md §11).
+                WindowInterop.BeginDragMove(this);
                 break;
             case "openDetail":
                 DetailRequested?.Invoke();
@@ -112,24 +114,6 @@ public partial class OverlayWindow : Window
             case "close":
                 CloseRequested?.Invoke();
                 break;
-        }
-    }
-
-    /// <summary>
-    /// <c>DragMove()</c> allein greift nicht, weil WebView2 die Mausereignisse
-    /// abfängt; die Kopfzeile meldet den Ziehbeginn deshalb per Nachricht
-    /// (DESIGN.md §11).
-    /// </summary>
-    private void BeginDrag()
-    {
-        try
-        {
-            DragMove();
-        }
-        catch (InvalidOperationException)
-        {
-            // Wirft, wenn die Maustaste zwischen Nachricht und Aufruf losgelassen
-            // wurde. Dann gibt es schlicht nichts zu ziehen.
         }
     }
 

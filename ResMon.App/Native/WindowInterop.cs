@@ -22,6 +22,32 @@ internal static class WindowInterop
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
     private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SendMessageW(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+
+    private const uint WM_NCLBUTTONDOWN = 0x00A1;
+    private const int HTCAPTION = 2;
+
+    /// <summary>
+    /// Startet das systemeigene Verschieben, als wäre auf eine Titelleiste
+    /// geklickt worden. <c>Window.DragMove()</c> ist hier nicht brauchbar: es
+    /// prüft <c>Mouse.LeftButton</c> aus dem WPF-Input-Stack, und der Mausklick
+    /// ist im Child-HWND der WebView2 gelandet, nicht im WPF-Fenster.
+    /// </summary>
+    public static void BeginDragMove(Window window)
+    {
+        IntPtr handle = new WindowInteropHelper(window).Handle;
+        if (handle == IntPtr.Zero)
+            return;
+
+        ReleaseCapture();
+        SendMessageW(handle, WM_NCLBUTTONDOWN, new IntPtr(HTCAPTION), IntPtr.Zero);
+    }
+
     public static void SetClickThrough(Window window, bool enabled)
     {
         IntPtr handle = new WindowInteropHelper(window).Handle;
