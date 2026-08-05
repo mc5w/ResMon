@@ -89,9 +89,11 @@ internal static class Program
         using var query = new PdhQuery();
         var counters = new CounterSource(query);
         var gpu = new GpuEngineSource(query);
+        var network = new NetworkSource(query);
 
         Console.WriteLine($"% Processor Utility verfügbar: {!counters.UsesUtilityFallback}");
         Console.WriteLine($"GPU-Engine-Zähler verfügbar:   {gpu.Available}");
+        Console.WriteLine($"Netz-Zähler verfügbar:         {network.Available}");
         Console.WriteLine();
 
         for (int i = 0; i <= iterations; i++)
@@ -105,12 +107,14 @@ internal static class Program
 
             CounterReading reading = counters.Read();
             GpuEngineReading gpuReading = gpu.Read();
+            NetworkMetrics net = network.Read();
 
             Console.WriteLine(
                 $"CPU {reading.CpuTotalPercent,6:F1} %   " +
                 $"RAM {reading.MemoryPercent,6:F1} % ({reading.MemoryUsedBytes / 1048576} / {reading.MemoryTotalBytes / 1048576} MB)   " +
-                $"Commit {reading.CommittedBytes / 1048576} MB   " +
-                $"GPU {gpuReading.TotalPercent,6:F1} %");
+                $"Zugesichert {reading.CommittedBytes / 1048576} MB   " +
+                $"GPU {gpuReading.TotalPercent,6:F1} %   " +
+                $"Netz ↓{net.ReceivedBytesPerSec / 1024,8:F1} ↑{net.SentBytesPerSec / 1024,8:F1} kB/s");
 
             if (reading.CpuPerCorePercent.Length > 0)
                 Console.WriteLine("    Kerne: " + string.Join(" ", reading.CpuPerCorePercent.Select(c => $"{c,5:F0}")));
@@ -169,6 +173,7 @@ internal static class Program
         using var query = new PdhQuery();
         var gpu = new GpuEngineSource(query);
         using var sampler = new ProcessSampler(services);
+        using var network = new NetworkTracer();
 
         if (!sampler.Available)
         {
@@ -176,13 +181,15 @@ internal static class Program
             return 2;
         }
 
+        network.Start();
         Console.WriteLine($"Legacy-Zählersatz (kein Process V2): {sampler.UsesLegacyCounterSet}");
+        Console.WriteLine($"ETW-Netzerfassung: {(network.IsRunning ? "aktiv" : "nicht verfügbar — " + network.Error)}");
 
         for (int i = 0; i <= iterations; i++)
         {
             query.Collect();
             IReadOnlyDictionary<int, GpuProcessUsage> gpuByPid = gpu.Read().ByProcess;
-            IReadOnlyList<ProcessSample> samples = sampler.Sample(gpuByPid);
+            IReadOnlyList<ProcessSample> samples = sampler.Sample(gpuByPid, network.Read());
 
             if (samples.Count == 0)
             {
@@ -191,13 +198,14 @@ internal static class Program
             }
 
             Console.WriteLine();
-            Console.WriteLine($"{"Name",-28} {"PID",7} {"CPU %",7} {"RAM MB",9} {"GPU %",7} {"VRAM MB",9}  Dienste");
+            Console.WriteLine($"{"Name",-26} {"PID",7} {"CPU %",7} {"RAM MB",8} {"GPU %",7} {"↓ kB/s",9} {"↑ kB/s",9}  Dienste");
             foreach (ProcessSample sample in samples.OrderByDescending(s => s.CpuPercent).Take(15))
             {
-                string services_ = sample.ServiceNames.Count > 0 ? string.Join(", ", sample.ServiceNames) : "";
+                string names = sample.ServiceNames.Count > 0 ? string.Join(", ", sample.ServiceNames) : "";
                 Console.WriteLine(
-                    $"{Truncate(sample.Name, 28),-28} {sample.Pid,7} {sample.CpuPercent,7:F1} " +
-                    $"{sample.WorkingSetBytes / 1048576,9} {sample.GpuPercent,7:F1} {sample.GpuMemBytes / 1048576,9}  {Truncate(services_, 60)}");
+                    $"{Truncate(sample.Name, 26),-26} {sample.Pid,7} {sample.CpuPercent,7:F1} " +
+                    $"{sample.WorkingSetBytes / 1048576,8} {sample.GpuPercent,7:F1} " +
+                    $"{sample.NetReceivedBytesPerSec / 1024,9:F1} {sample.NetSentBytesPerSec / 1024,9:F1}  {Truncate(names, 44)}");
             }
 
             Thread.Sleep(2000);

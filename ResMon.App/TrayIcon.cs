@@ -99,6 +99,7 @@ public sealed class TrayIcon : IDisposable
         root.DropDownItems.Add(Toggle("CPU", visible.Cpu, v => visible.Cpu = v));
         root.DropDownItems.Add(Toggle("GPU", visible.Gpu, v => visible.Gpu = v));
         root.DropDownItems.Add(Toggle("Arbeitsspeicher", visible.Ram, v => visible.Ram = v));
+        root.DropDownItems.Add(Toggle("Netzwerk", visible.Net, v => visible.Net = v));
         root.DropDownItems.Add(Toggle("Temperaturen", visible.Temps, v => visible.Temps = v));
         return root;
 

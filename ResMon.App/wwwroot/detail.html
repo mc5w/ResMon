@@ -7,6 +7,8 @@
     <link rel="stylesheet" href="detail.css">
 </head>
 <body>
+    <p id="notice" class="notice" hidden></p>
+
     <section class="tiles">
         <article class="tile" data-metric="cpu">
             <h2>CPU</h2>
@@ -26,6 +28,13 @@
             <h2>Arbeitsspeicher</h2>
             <p class="big"><span id="ram-percent">–</span><span class="unit">%</span></p>
             <p class="sub" id="ram-sub">–</p>
+            <p class="sub" id="ram-commit" title="Summe des Speichers, den Windows allen Prozessen fest zugesagt hat. Er darf jederzeit angefordert werden und wird bei Bedarf in die Auslagerungsdatei geschrieben — er liegt deshalb nicht zwangsläufig im RAM und kann größer sein als der eingebaute Arbeitsspeicher.">–</p>
+        </article>
+
+        <article class="tile" data-metric="net">
+            <h2>Netzwerk</h2>
+            <p class="big"><span id="net-rx">–</span><span class="unit" id="net-rx-unit">kB/s</span></p>
+            <p class="sub" id="net-sub">–</p>
         </article>
     </section>
 
@@ -42,29 +51,31 @@
     </section>
 
     <section class="controls">
-        <input id="filter" type="search" placeholder="Prozessname filtern …" autocomplete="off" spellcheck="false">
+        <input id="filter" type="search" placeholder="Prozessname, Dienst oder Notiz filtern …" autocomplete="off" spellcheck="false">
         <label><input id="aggregate" type="checkbox"> Prozessbäume zusammenfassen</label>
         <label><input id="only-active" type="checkbox"> Nur aktive</label>
+
+        <div class="menu">
+            <button id="columns-button" type="button">Spalten ▾</button>
+            <div id="columns-menu" class="menu-panel" hidden></div>
+        </div>
+
         <span class="status" id="status">–</span>
     </section>
 
     <div class="table-wrap">
         <table id="processes">
             <thead>
-                <tr>
-                    <th data-sort="name" class="col-name">Name</th>
-                    <th data-sort="pid" class="num">PID</th>
-                    <th data-sort="cpu" class="num sorted-desc">CPU&nbsp;%</th>
-                    <th data-sort="ws" class="num">Arbeitsspeicher</th>
-                    <th data-sort="gpu" class="num">GPU&nbsp;%</th>
-                    <th data-sort="engines" class="col-engines">GPU-Engines</th>
-                    <th data-sort="gpuMem" class="num">VRAM</th>
-                    <th data-sort="services" class="col-services">Dienste</th>
-                </tr>
+                <tr id="head-row"></tr>
             </thead>
             <tbody></tbody>
         </table>
     </div>
+
+    <p class="hint-bar">
+        Klick auf eine Zeile heftet den Prozess oben an, damit er beim Sortieren nicht mehr wandert.
+        Doppelklick auf die Notizspalte zum Bearbeiten.
+    </p>
 
     <script src="detail.js"></script>
 </body>

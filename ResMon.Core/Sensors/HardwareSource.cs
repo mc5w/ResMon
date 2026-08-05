@@ -15,9 +15,10 @@ public sealed record HardwareReading(
     double? GpuFanRpm,
     double? GpuPowerW,
     long GpuMemUsedBytes,
-    long GpuMemTotalBytes)
+    long GpuMemTotalBytes,
+    bool CpuSensorsBlocked)
 {
-    public static readonly HardwareReading Empty = new(null, null, null, null, null, null, null, 0, 0);
+    public static readonly HardwareReading Empty = new(null, null, null, null, null, null, null, 0, 0, false);
 }
 
 /// <summary>Ein einzelner Sensor, wie ihn das Probe-Werkzeug ausgibt.</summary>
@@ -172,16 +173,23 @@ public sealed class HardwareSource : IDisposable
         double? gpuTemp = Prefer(gpuTemps, "Core");
         double? gpuPower = Prefer(gpuPowers, "Package");
 
+        // Auf gesperrtem WinRing0 (Speicherintegrität, Sperrliste für verwundbare
+        // Treiber) existieren die CPU-Sensoren, melden aber konstant 0. Eine
+        // CPU-Temperatur von 0 °C oder ein Takt von 0 MHz ist physikalisch
+        // unmöglich — das als Messwert anzuzeigen wäre gelogen.
+        bool cpuBlocked = cpuTemp is <= 0 || cpuClock is <= 0;
+
         return new HardwareReading(
-            cpuTemp,
-            cpuClock,
-            cpuPower,
+            NonZero(cpuTemp),
+            NonZero(cpuClock),
+            NonZero(cpuPower),
             gpuTemp,
             gpuLoad,
             gpuFan,
             gpuPower,
             ToBytes(gpuMemUsedMb ?? gpuMemUsedFallbackMb),
-            ToBytes(gpuMemTotalMb));
+            ToBytes(gpuMemTotalMb),
+            cpuBlocked);
     }
 
     /// <summary>
@@ -235,6 +243,9 @@ public sealed class HardwareSource : IDisposable
         => name.Contains("Package", StringComparison.OrdinalIgnoreCase)
            || name.Contains("Tdie", StringComparison.OrdinalIgnoreCase)
            || name.Equals("Core (Tctl/Tdie)", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Blendet Nullwerte aus — bei CPU-Sensoren bedeuten sie „kein Zugriff", nicht „null".</summary>
+    private static double? NonZero(double? value) => value is > 0 ? value : null;
 
     private static long ToBytes(double? megabytes)
         => megabytes is { } mb && mb > 0 ? (long)(mb * 1024 * 1024) : 0;

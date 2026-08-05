@@ -1,31 +1,10 @@
-// Detailfenster. Sortierung, Filterung und Baum-Aggregation laufen vollständig
-// hier, der Host liefert nur Rohdaten (DESIGN.md §13).
+// Detailfenster. Sortierung, Filterung, Aggregation, Spaltenauswahl und Notizen
+// laufen vollständig hier, der Host liefert nur Rohdaten (DESIGN.md §13).
 
 const host = window.chrome && window.chrome.webview;
 
-const state = {
-    processes: [],
-    history: { cpu: [], gpu: [], ram: [] },
-    sortKey: 'cpu',
-    sortAsc: false,
-    filter: '',
-    aggregate: false,
-    onlyActive: false,
-};
-
-const elements = {
-    cpuPercent: document.getElementById('cpu-percent'),
-    cpuSub: document.getElementById('cpu-sub'),
-    cpuCores: document.getElementById('cpu-cores'),
-    gpuPercent: document.getElementById('gpu-percent'),
-    gpuSub: document.getElementById('gpu-sub'),
-    gpuEngines: document.getElementById('gpu-engines'),
-    ramPercent: document.getElementById('ram-percent'),
-    ramSub: document.getElementById('ram-sub'),
-    chart: document.getElementById('history'),
-    tbody: document.querySelector('#processes tbody'),
-    status: document.getElementById('status'),
-};
+const STORAGE_COLUMNS = 'resmon.columns';
+const STORAGE_NOTES = 'resmon.notes';
 
 // ---------- Formatierung ----------
 
@@ -42,6 +21,16 @@ function formatBytes(bytes) {
     return `${nf0.format(bytes / 1048576)} MB`;
 }
 
+function formatRate(bytesPerSecond) {
+    if (!bytesPerSecond || bytesPerSecond < 128) {
+        return '–';
+    }
+    if (bytesPerSecond >= 1048576) {
+        return `${nf1.format(bytesPerSecond / 1048576)} MB/s`;
+    }
+    return `${nf0.format(bytesPerSecond / 1024)} kB/s`;
+}
+
 function formatPercent(value) {
     return value > 0 ? nf1.format(value) : '–';
 }
@@ -50,9 +39,89 @@ function optional(value, suffix, digits = 0) {
     if (value === null || value === undefined) {
         return null;
     }
-    const formatter = digits === 0 ? nf0 : nf1;
-    return `${formatter.format(value)} ${suffix}`;
+    return `${(digits === 0 ? nf0 : nf1).format(value)} ${suffix}`;
 }
+
+function engineList(row) {
+    return Object.entries(row.gpuEngines || {})
+        .sort((a, b) => b[1] - a[1])
+        .map(([engine, value]) => `${engine} ${nf1.format(value)}`)
+        .join(', ');
+}
+
+// ---------- Spaltendefinition ----------
+
+const COLUMNS = [
+    { key: 'name', label: 'Name', align: 'left', locked: true, text: row => row.name },
+    { key: 'pid', label: 'PID', align: 'right', text: row => String(row.pid) },
+    { key: 'cpu', label: 'CPU %', align: 'right', load: true, text: row => formatPercent(row.cpu) },
+    { key: 'ws', label: 'Arbeitsspeicher', align: 'right', text: row => formatBytes(row.ws) },
+    { key: 'priv', label: 'Privat', align: 'right', off: true, text: row => formatBytes(row.priv) },
+    { key: 'gpu', label: 'GPU %', align: 'right', load: true, text: row => formatPercent(row.gpu) },
+    { key: 'engines', label: 'GPU-Engines', align: 'left', text: row => engineList(row) || '–' },
+    { key: 'gpuMem', label: 'VRAM', align: 'right', text: row => formatBytes(row.gpuMem) },
+    { key: 'rx', label: '↓ Download', align: 'right', text: row => formatRate(row.rx) },
+    { key: 'tx', label: '↑ Upload', align: 'right', text: row => formatRate(row.tx) },
+    { key: 'services', label: 'Dienste', align: 'left', text: row => (row.services || []).join(', ') || '–' },
+    { key: 'note', label: 'Notiz', align: 'left', text: row => notes[row.name] || '' },
+];
+
+const state = {
+    processes: [],
+    history: { cpu: [], gpu: [], ram: [] },
+    sortKey: 'cpu',
+    sortAsc: false,
+    filter: '',
+    aggregate: false,
+    onlyActive: false,
+    pinned: new Set(),
+    editing: null,
+};
+
+function loadJson(key, fallback) {
+    try {
+        return JSON.parse(localStorage.getItem(key)) ?? fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+const notes = loadJson(STORAGE_NOTES, {});
+const hiddenColumns = new Set(loadJson(STORAGE_COLUMNS, COLUMNS.filter(c => c.off).map(c => c.key)));
+
+function activeColumns() {
+    return COLUMNS.filter(column => column.locked || !hiddenColumns.has(column.key));
+}
+
+function saveColumns() {
+    localStorage.setItem(STORAGE_COLUMNS, JSON.stringify([...hiddenColumns]));
+}
+
+function saveNotes() {
+    localStorage.setItem(STORAGE_NOTES, JSON.stringify(notes));
+}
+
+const elements = {
+    notice: document.getElementById('notice'),
+    cpuPercent: document.getElementById('cpu-percent'),
+    cpuSub: document.getElementById('cpu-sub'),
+    cpuCores: document.getElementById('cpu-cores'),
+    gpuPercent: document.getElementById('gpu-percent'),
+    gpuSub: document.getElementById('gpu-sub'),
+    gpuEngines: document.getElementById('gpu-engines'),
+    ramPercent: document.getElementById('ram-percent'),
+    ramSub: document.getElementById('ram-sub'),
+    ramCommit: document.getElementById('ram-commit'),
+    netRx: document.getElementById('net-rx'),
+    netRxUnit: document.getElementById('net-rx-unit'),
+    netSub: document.getElementById('net-sub'),
+    chart: document.getElementById('history'),
+    headRow: document.getElementById('head-row'),
+    tbody: document.querySelector('#processes tbody'),
+    status: document.getElementById('status'),
+    columnsButton: document.getElementById('columns-button'),
+    columnsMenu: document.getElementById('columns-menu'),
+};
 
 // ---------- Kacheln ----------
 
@@ -84,9 +153,15 @@ function renderTiles(data) {
     renderEngines(data.gpu.byEngineType);
 
     elements.ramPercent.textContent = nf1.format(data.ram.percent);
-    elements.ramSub.textContent =
-        `${formatBytes(data.ram.usedBytes)} / ${formatBytes(data.ram.totalBytes)}  ·  ` +
-        `Commit ${formatBytes(data.ram.committedBytes)}`;
+    elements.ramSub.textContent = `${formatBytes(data.ram.usedBytes)} / ${formatBytes(data.ram.totalBytes)} belegt`;
+    elements.ramCommit.textContent = `${formatBytes(data.ram.committedBytes)} zugesichert`;
+
+    const rx = data.net.rx || 0;
+    elements.netRx.textContent = rx >= 1048576 ? nf1.format(rx / 1048576) : nf0.format(rx / 1024);
+    elements.netRxUnit.textContent = rx >= 1048576 ? 'MB/s ↓' : 'kB/s ↓';
+    elements.netSub.textContent = data.net.available
+        ? `${formatRate(data.net.tx)} Upload`
+        : 'Netz-Zähler nicht verfügbar';
 }
 
 function renderCores(cores) {
@@ -102,17 +177,28 @@ function renderCores(cores) {
 
 function renderEngines(byEngineType) {
     const entries = Object.entries(byEngineType || {});
-    if (entries.length === 0) {
-        elements.gpuEngines.replaceChildren();
-        return;
-    }
-
     elements.gpuEngines.replaceChildren(...entries.map(([name, value]) => {
         const chip = document.createElement('span');
         chip.className = 'chip';
         chip.textContent = `${name} ${nf1.format(value)} %`;
         return chip;
     }));
+}
+
+function renderNotice(diag) {
+    const messages = [];
+    if (diag.cpuSensorsBlocked) {
+        messages.push(
+            'CPU-Temperatur, -Takt und -Leistung sind nicht lesbar: der Sensor-Treiber ' +
+            'WinRing0 wird von der Speicherintegrität und der Sperrliste für verwundbare ' +
+            'Treiber blockiert. GPU-Werte kommen über NVAPI und sind davon nicht betroffen.');
+    }
+    if (diag.networkTraceError) {
+        messages.push(`Netzverkehr pro Prozess nicht verfügbar: ${diag.networkTraceError}`);
+    }
+
+    elements.notice.hidden = messages.length === 0;
+    elements.notice.textContent = messages.join('  ');
 }
 
 // ---------- Verlaufsdiagramm ----------
@@ -132,7 +218,6 @@ function drawChart() {
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     context.clearRect(0, 0, width, height);
 
-    // Rasterlinien bei 25/50/75 %.
     context.strokeStyle = 'rgba(255,255,255,0.06)';
     context.lineWidth = 1;
     for (const fraction of [0.25, 0.5, 0.75]) {
@@ -169,7 +254,7 @@ function drawChart() {
     line(state.history.cpu, '#60a5fa');
 }
 
-// ---------- Prozesstabelle ----------
+// ---------- Aggregation ----------
 
 /**
  * Fasst Kindprozesse unter ihrem Elternprozess zusammen. Es wird transitiv bis
@@ -183,9 +268,9 @@ function aggregateTree(processes) {
         let current = process;
         // Tiefenbegrenzung als Schutz vor recycelten PIDs, die einen Zyklus bilden.
         for (let depth = 0; depth < 32; depth++) {
-            const parent = current.parentPid !== null && current.parentPid !== undefined
-                ? byPid.get(current.parentPid)
-                : undefined;
+            const parent = current.parentPid === null || current.parentPid === undefined
+                ? undefined
+                : byPid.get(current.parentPid);
             if (!parent || parent === current) {
                 break;
             }
@@ -200,18 +285,9 @@ function aggregateTree(processes) {
         let group = groups.get(root.pid);
         if (!group) {
             group = {
-                pid: root.pid,
-                parentPid: null,
-                name: root.name,
-                description: root.description,
-                cpu: 0,
-                ws: 0,
-                priv: 0,
-                gpu: 0,
-                gpuEngines: {},
-                gpuMem: 0,
-                services: [],
-                children: 0,
+                pid: root.pid, parentPid: null, name: root.name, description: root.description,
+                cpu: 0, ws: 0, priv: 0, gpu: 0, gpuEngines: {}, gpuMem: 0,
+                rx: 0, tx: 0, services: [], children: 0,
             };
             groups.set(root.pid, group);
         }
@@ -220,6 +296,8 @@ function aggregateTree(processes) {
         group.ws += process.ws;
         group.priv += process.priv;
         group.gpuMem += process.gpuMem;
+        group.rx += process.rx || 0;
+        group.tx += process.tx || 0;
         for (const [engine, value] of Object.entries(process.gpuEngines || {})) {
             group.gpuEngines[engine] = (group.gpuEngines[engine] || 0) + value;
         }
@@ -244,31 +322,22 @@ function aggregateTree(processes) {
     return [...groups.values()];
 }
 
-function visibleRows() {
-    let rows = state.aggregate ? aggregateTree(state.processes) : state.processes;
+// ---------- Zeilenauswahl ----------
 
-    if (state.filter) {
-        const needle = state.filter.toLowerCase();
-        rows = rows.filter(row =>
-            row.name.toLowerCase().includes(needle) ||
-            (row.description || '').toLowerCase().includes(needle) ||
-            (row.services || []).some(service => service.toLowerCase().includes(needle)) ||
-            String(row.pid) === needle);
-    }
-
-    if (state.onlyActive) {
-        rows = rows.filter(row => row.cpu >= 0.1 || row.gpu >= 0.1);
-    }
-
-    const key = state.sortKey;
-    const direction = state.sortAsc ? 1 : -1;
-    return [...rows].sort((a, b) => direction * compare(a, b, key));
+function matchesFilter(row, needle) {
+    return row.name.toLowerCase().includes(needle)
+        || (row.description || '').toLowerCase().includes(needle)
+        || (notes[row.name] || '').toLowerCase().includes(needle)
+        || (row.services || []).some(service => service.toLowerCase().includes(needle))
+        || String(row.pid) === needle;
 }
 
 function compare(a, b, key) {
     switch (key) {
         case 'name':
             return a.name.localeCompare(b.name, 'de');
+        case 'note':
+            return (notes[a.name] || '').localeCompare(notes[b.name] || '', 'de');
         case 'services':
             return (a.services || []).join().localeCompare((b.services || []).join(), 'de');
         case 'engines':
@@ -278,79 +347,318 @@ function compare(a, b, key) {
     }
 }
 
+function sortRows(rows) {
+    const direction = state.sortAsc ? 1 : -1;
+    // Die PID als zweites Kriterium: bei gleichen Werten bleibt die Reihenfolge
+    // sonst dem Zufall überlassen und die Tabelle zappelt.
+    return [...rows].sort((a, b) => direction * compare(a, b, state.sortKey) || a.pid - b.pid);
+}
+
+function visibleRows() {
+    const all = state.aggregate ? aggregateTree(state.processes) : state.processes;
+    const needle = state.filter.toLowerCase();
+
+    const pinned = [];
+    const rest = [];
+    for (const row of all) {
+        // Angeheftete Zeilen überstehen Filter und "nur aktive" — genau dafür
+        // sind sie da.
+        if (state.pinned.has(row.pid)) {
+            pinned.push(row);
+            continue;
+        }
+        if (needle && !matchesFilter(row, needle)) {
+            continue;
+        }
+        if (state.onlyActive && row.cpu < 0.1 && row.gpu < 0.1 && !row.rx && !row.tx) {
+            continue;
+        }
+        rest.push(row);
+    }
+
+    return { pinned: sortRows(pinned), rest: sortRows(rest), total: all.length };
+}
+
+// ---------- Tabelle ----------
+
+const rowCache = new Map();
+
+function renderHead() {
+    const columns = activeColumns();
+    const cells = columns.map(column => {
+        const th = document.createElement('th');
+        th.textContent = column.label;
+        th.dataset.sort = column.key;
+        th.className = column.align === 'right' ? 'num' : '';
+        if (state.sortKey === column.key) {
+            th.classList.add(state.sortAsc ? 'sorted-asc' : 'sorted-desc');
+        }
+        th.addEventListener('click', () => {
+            if (state.sortKey === column.key) {
+                state.sortAsc = !state.sortAsc;
+            } else {
+                state.sortKey = column.key;
+                // Zahlenspalten absteigend beginnen, Textspalten aufsteigend.
+                state.sortAsc = column.align === 'left';
+            }
+            renderHead();
+            renderTable();
+        });
+        return th;
+    });
+
+    elements.headRow.replaceChildren(...cells);
+}
+
 function loadClass(value) {
     if (value >= 50) {
-        return 'hot';
+        return ' hot';
     }
-    return value >= 15 ? 'warm' : '';
+    return value >= 15 ? ' warm' : '';
+}
+
+/**
+ * Baut oder aktualisiert die Zeile eines Prozesses. Bestehende Zeilen werden
+ * wiederverwendet und nur dort beschrieben, wo sich der Text geändert hat —
+ * sonst flackert die Tabelle bei jedem Takt.
+ */
+function rowElement(row, columns) {
+    let entry = rowCache.get(row.pid);
+    if (!entry || entry.columns !== columns.length) {
+        const tr = document.createElement('tr');
+        tr.dataset.pid = row.pid;
+        const cells = new Map();
+        for (const column of columns) {
+            const td = document.createElement('td');
+            td.dataset.key = column.key;
+            tr.append(td);
+            cells.set(column.key, td);
+        }
+        entry = { tr, cells, columns: columns.length };
+        rowCache.set(row.pid, entry);
+    }
+
+    entry.tr.classList.toggle('pinned', state.pinned.has(row.pid));
+
+    for (const column of columns) {
+        const td = entry.cells.get(column.key);
+        if (!td) {
+            continue;
+        }
+        if (column.key === 'note' && state.editing === row.pid) {
+            continue;
+        }
+
+        const text = column.text(row);
+        const className =
+            (column.align === 'right' ? 'num' : '') +
+            (column.load ? loadClass(row[column.key]) : '') +
+            (column.key === 'services' && (row.services || []).length ? ' services' : '') +
+            (column.key === 'engines' ? ' engine-list' : '') +
+            (column.key === 'note' ? ' note' : '');
+
+        if (td.className !== className.trim()) {
+            td.className = className.trim();
+        }
+
+        if (column.key === 'name') {
+            renderNameCell(td, row);
+        } else if (td.textContent !== text) {
+            td.textContent = text;
+            td.title = text;
+        }
+    }
+
+    return entry.tr;
+}
+
+function renderNameCell(td, row) {
+    const badge = row.children ? `+${row.children}` : '';
+    const signature = `${row.name}|${badge}|${row.description || ''}`;
+    if (td.dataset.signature === signature) {
+        return;
+    }
+    td.dataset.signature = signature;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'name-cell';
+
+    const strong = document.createElement('span');
+    strong.textContent = row.name;
+    wrap.append(strong);
+
+    if (badge) {
+        const children = document.createElement('span');
+        children.className = 'children';
+        children.textContent = badge;
+        children.title = `${row.children} Kindprozesse zusammengefasst`;
+        wrap.append(children);
+    }
+
+    if (row.description) {
+        const desc = document.createElement('span');
+        desc.className = 'desc';
+        desc.textContent = row.description;
+        wrap.append(desc);
+    }
+
+    td.replaceChildren(wrap);
+    td.title = row.description ? `${row.name} — ${row.description}` : row.name;
 }
 
 function renderTable() {
-    const rows = visibleRows();
+    // Ein Neuaufbau würde das Eingabefeld aus dem Fokus reißen und die Notiz
+    // mitten im Tippen abschließen.
+    if (state.editing !== null) {
+        return;
+    }
+
+    const { pinned, rest, total } = visibleRows();
+    const columns = activeColumns();
+    const shown = [...pinned, ...rest.slice(0, 400)];
+
     const fragment = document.createDocumentFragment();
-
-    for (const row of rows.slice(0, 400)) {
-        const tr = document.createElement('tr');
-
-        const name = document.createElement('td');
-        name.className = 'col-name';
-        const nameCell = document.createElement('div');
-        nameCell.className = 'name-cell';
-
-        const strong = document.createElement('span');
-        strong.textContent = row.name;
-        nameCell.append(strong);
-
-        if (row.children) {
-            const badge = document.createElement('span');
-            badge.className = 'children';
-            badge.textContent = `+${row.children}`;
-            badge.title = `${row.children} Kindprozesse zusammengefasst`;
-            nameCell.append(badge);
-        }
-
-        if (row.description) {
-            const desc = document.createElement('span');
-            desc.className = 'desc';
-            desc.textContent = row.description;
-            nameCell.append(desc);
-        }
-
-        name.append(nameCell);
-        tr.append(name);
-
-        tr.append(cell(String(row.pid), 'num'));
-        tr.append(cell(formatPercent(row.cpu), `num ${loadClass(row.cpu)}`));
-        tr.append(cell(formatBytes(row.ws), 'num'));
-        tr.append(cell(formatPercent(row.gpu), `num ${loadClass(row.gpu)}`));
-
-        const engines = Object.entries(row.gpuEngines || {})
-            .sort((a, b) => b[1] - a[1])
-            .map(([engine, value]) => `${engine} ${nf1.format(value)}`)
-            .join(', ');
-        tr.append(cell(engines || '–', 'engine-list'));
-
-        tr.append(cell(formatBytes(row.gpuMem), 'num'));
-        tr.append(cell((row.services || []).join(', ') || '–', row.services && row.services.length ? 'services' : ''));
-
-        fragment.append(tr);
+    for (const row of shown) {
+        fragment.append(rowElement(row, columns));
     }
-
     elements.tbody.replaceChildren(fragment);
-    elements.status.textContent =
-        `${rows.length} von ${state.processes.length} Prozessen` +
-        (rows.length > 400 ? ' (400 angezeigt)' : '');
+
+    // Zeilen beendeter Prozesse aus dem Zwischenspeicher werfen.
+    const alive = new Set(shown.map(row => row.pid));
+    for (const pid of rowCache.keys()) {
+        if (!alive.has(pid)) {
+            rowCache.delete(pid);
+        }
+    }
+
+    const pinnedNote = pinned.length ? `, ${pinned.length} angeheftet` : '';
+    const cut = rest.length > 400 ? ' (400 angezeigt)' : '';
+    elements.status.textContent = `${pinned.length + rest.length} von ${total} Prozessen${pinnedNote}${cut}`;
 }
 
-function cell(text, className) {
-    const td = document.createElement('td');
-    if (className) {
-        td.className = className;
+// ---------- Anheften und Notizen ----------
+
+elements.tbody.addEventListener('click', event => {
+    const tr = event.target.closest('tr');
+    if (!tr || event.target.closest('input')) {
+        return;
     }
-    td.textContent = text;
-    td.title = text;
-    return td;
+
+    // Die Notizspalte gehört dem Doppelklick — sonst schaltet der erste Klick
+    // des Bearbeitens nebenbei das Anheften um.
+    if (event.target.closest('td')?.dataset.key === 'note') {
+        return;
+    }
+
+    const pid = Number(tr.dataset.pid);
+    if (state.pinned.has(pid)) {
+        state.pinned.delete(pid);
+    } else {
+        state.pinned.add(pid);
+    }
+    renderTable();
+});
+
+elements.tbody.addEventListener('dblclick', event => {
+    const td = event.target.closest('td');
+    const tr = event.target.closest('tr');
+    if (!td || !tr || td.dataset.key !== 'note') {
+        return;
+    }
+
+    event.stopPropagation();
+    const pid = Number(tr.dataset.pid);
+    const row = state.processes.find(p => p.pid === pid)
+        || aggregateTree(state.processes).find(p => p.pid === pid);
+    if (!row) {
+        return;
+    }
+
+    startEditingNote(td, pid, row.name);
+});
+
+function startEditingNote(td, pid, name) {
+    state.editing = pid;
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'note-input';
+    input.value = notes[name] || '';
+    input.placeholder = `Notiz zu ${name}`;
+    input.maxLength = 200;
+
+    const finish = commit => {
+        if (state.editing !== pid) {
+            return;
+        }
+        state.editing = null;
+
+        if (commit) {
+            const value = input.value.trim();
+            // Notizen hängen am Prozessnamen, nicht an der PID — sonst wären sie
+            // nach dem nächsten Neustart wertlos.
+            if (value) {
+                notes[name] = value;
+            } else {
+                delete notes[name];
+            }
+            saveNotes();
+        }
+
+        td.textContent = notes[name] || '';
+        renderTable();
+    };
+
+    input.addEventListener('keydown', event => {
+        if (event.key === 'Enter') {
+            finish(true);
+        } else if (event.key === 'Escape') {
+            finish(false);
+        }
+    });
+    input.addEventListener('blur', () => finish(true));
+
+    td.replaceChildren(input);
+    input.focus();
+    input.select();
 }
+
+// ---------- Spaltenauswahl ----------
+
+function buildColumnsMenu() {
+    const items = COLUMNS.filter(column => !column.locked).map(column => {
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !hiddenColumns.has(column.key);
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) {
+                hiddenColumns.delete(column.key);
+            } else {
+                hiddenColumns.add(column.key);
+            }
+            saveColumns();
+            rowCache.clear();
+            renderHead();
+            renderTable();
+        });
+        label.append(checkbox, document.createTextNode(column.label));
+        return label;
+    });
+
+    elements.columnsMenu.replaceChildren(...items);
+}
+
+elements.columnsButton.addEventListener('click', event => {
+    event.stopPropagation();
+    elements.columnsMenu.hidden = !elements.columnsMenu.hidden;
+});
+
+document.addEventListener('click', () => {
+    elements.columnsMenu.hidden = true;
+});
+
+elements.columnsMenu.addEventListener('click', event => event.stopPropagation());
 
 // ---------- Bedienelemente ----------
 
@@ -361,6 +669,7 @@ document.getElementById('filter').addEventListener('input', event => {
 
 document.getElementById('aggregate').addEventListener('change', event => {
     state.aggregate = event.target.checked;
+    rowCache.clear();
     renderTable();
 });
 
@@ -369,26 +678,10 @@ document.getElementById('only-active').addEventListener('change', event => {
     renderTable();
 });
 
-for (const header of document.querySelectorAll('#processes thead th')) {
-    header.addEventListener('click', () => {
-        const key = header.dataset.sort;
-        if (state.sortKey === key) {
-            state.sortAsc = !state.sortAsc;
-        } else {
-            state.sortKey = key;
-            // Zahlenspalten absteigend beginnen, Namen aufsteigend.
-            state.sortAsc = key === 'name' || key === 'services';
-        }
-
-        for (const other of document.querySelectorAll('#processes thead th')) {
-            other.classList.remove('sorted-asc', 'sorted-desc');
-        }
-        header.classList.add(state.sortAsc ? 'sorted-asc' : 'sorted-desc');
-        renderTable();
-    });
-}
-
 window.addEventListener('resize', drawChart);
+
+buildColumnsMenu();
+renderHead();
 
 // ---------- Host-Nachrichten ----------
 
@@ -400,6 +693,7 @@ if (host) {
         }
 
         renderTiles(data);
+        renderNotice(data.diag || {});
         state.history = data.history;
         drawChart();
 

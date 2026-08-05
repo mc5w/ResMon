@@ -1,4 +1,5 @@
 using System.Windows;
+using ResMon.App.Bridge;
 using ResMon.Core;
 // WPF und WinForms sind beide referenziert (Tray-Icon); Application und
 // MessageBox gibt es in beiden Namensräumen.
@@ -41,12 +42,12 @@ public partial class App : Application
 
         _overlay = new OverlayWindow(_settings);
         _overlay.DetailRequested += ShowDetailWindow;
-        _overlay.CloseRequested += Shutdown;
+        _overlay.CloseRequested += Quit;
         _overlay.Show();
 
         _tray = new TrayIcon(_settings);
         _tray.DetailRequested += ShowDetailWindow;
-        _tray.ExitRequested += Shutdown;
+        _tray.ExitRequested += Quit;
         _tray.OpacityChanged += opacity => _overlay.ApplyOpacity(opacity);
         _tray.ClickThroughChanged += enabled => _overlay.ApplyClickThrough(enabled);
 
@@ -70,7 +71,9 @@ public partial class App : Application
         {
             AggregateSample[] history = _collector!.History.ToArray();
             _overlay?.Push(snapshot, history);
-            _detail?.Push(snapshot, history);
+            _detail?.Push(snapshot, history, new HostDiagnostics(
+                _collector.CpuSensorsBlocked,
+                _collector.NetworkTraceError));
         });
     }
 
@@ -98,6 +101,17 @@ public partial class App : Application
         if (_detail.WindowState == WindowState.Minimized)
             _detail.WindowState = WindowState.Normal;
         _detail.Activate();
+    }
+
+    /// <summary>
+    /// Beenden mit Wachhund: das Entladen des Sensor-Treibers und das Stoppen der
+    /// ETW-Sitzung können hängen bleiben. Ein Monitor, der sich nicht schließen
+    /// lässt, ist schlimmer als einer, der hart aussteigt.
+    /// </summary>
+    private void Quit()
+    {
+        _ = Task.Delay(TimeSpan.FromSeconds(5)).ContinueWith(_ => Environment.Exit(0));
+        Shutdown();
     }
 
     protected override void OnExit(ExitEventArgs e)

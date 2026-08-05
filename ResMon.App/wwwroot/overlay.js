@@ -4,7 +4,7 @@
 
 const host = window.chrome && window.chrome.webview;
 
-const COLORS = { cpu: '#60a5fa', gpu: '#4ade80', ram: '#fb923c' };
+const COLORS = { cpu: '#60a5fa', gpu: '#4ade80', ram: '#fb923c', net: '#a78bfa' };
 
 const rows = {};
 for (const element of document.querySelectorAll('.row')) {
@@ -14,6 +14,8 @@ for (const element of document.querySelectorAll('.row')) {
         value: element.querySelector('.value'),
         temp: element.querySelector('.temp'),
         spark: element.querySelector('.spark'),
+        down: element.querySelector('.rate.down'),
+        up: element.querySelector('.rate.up'),
     };
 }
 
@@ -25,10 +27,12 @@ function send(cmd, extra) {
     }
 }
 
-// DragMove() im Host braucht den Anstoß von hier, weil WebView2 die
+// Das Verschieben im Host braucht den Anstoß von hier, weil WebView2 die
 // Mausereignisse abfängt (DESIGN.md §11).
 document.getElementById('grip').addEventListener('mousedown', event => {
-    if (event.button === 0) {
+    // Schaltflächen in der Kopfzeile ausnehmen: der Verschiebe-Loop des Systems
+    // verschluckt sonst das mouseup, und das click-Ereignis entsteht nie.
+    if (event.button === 0 && !event.target.closest('button')) {
         send('drag');
     }
 });
@@ -55,8 +59,23 @@ function formatGiB(bytes) {
     return `${(bytes / 1073741824).toFixed(1)} GB`;
 }
 
-/** Zeichnet eine Sparkline in feste 0–100-Skalierung, damit Zeilen vergleichbar bleiben. */
-function drawSparkline(canvas, series, color) {
+/** Datenrate kompakt: unter 1 MB/s in kB/s, darüber in MB/s. */
+function formatRate(bytesPerSecond) {
+    if (!bytesPerSecond || bytesPerSecond < 512) {
+        return '0';
+    }
+    if (bytesPerSecond < 1048576) {
+        return `${(bytesPerSecond / 1024).toFixed(0)} kB/s`;
+    }
+    return `${(bytesPerSecond / 1048576).toFixed(1)} MB/s`;
+}
+
+/**
+ * Zeichnet eine Sparkline. Ohne max wird auf 0–100 skaliert, damit die Zeilen
+ * vergleichbar bleiben; Netzraten haben keine Obergrenze und skalieren sich auf
+ * ihr eigenes Maximum.
+ */
+function drawSparkline(canvas, series, color, max = 100) {
     const context = canvas.getContext('2d');
     const ratio = window.devicePixelRatio || 1;
     const width = canvas.clientWidth;
@@ -75,7 +94,8 @@ function drawSparkline(canvas, series, color) {
     }
 
     const step = width / (series.length - 1);
-    const toY = value => height - (Math.min(100, Math.max(0, value)) / 100) * (height - 1) - 0.5;
+    const scale = Math.max(max, 1);
+    const toY = value => height - (Math.min(scale, Math.max(0, value)) / scale) * (height - 1) - 0.5;
 
     context.beginPath();
     context.moveTo(0, toY(series[0]));
@@ -124,6 +144,15 @@ function render(data) {
     updateRow('cpu', data.cpu.percent, data.cpu.tempC, showTemps, data.visible.cpu);
     updateRow('gpu', data.gpu.percent, data.gpu.tempC, showTemps, data.visible.gpu, data.gpu.available);
     updateRow('ram', data.ram.percent, null, false, data.visible.ram);
+
+    const net = rows.net;
+    net.root.hidden = !data.visible.net;
+    if (data.visible.net) {
+        net.root.classList.toggle('stale', !data.net.available);
+        net.down.textContent = formatRate(data.net.rx);
+        net.up.textContent = formatRate(data.net.tx);
+        drawSparkline(net.spark, data.history.net, COLORS.net, Math.max(...data.history.net, 1));
+    }
 
     drawSparkline(rows.cpu.spark, data.history.cpu, COLORS.cpu);
     drawSparkline(rows.gpu.spark, data.history.gpu, COLORS.gpu);

@@ -37,7 +37,7 @@ public partial class DetailWindow : Window
     }
 
     /// <summary>Schiebt einen Messpunkt in die Oberfläche. Muss auf dem UI-Thread laufen.</summary>
-    public void Push(SystemSnapshot snapshot, AggregateSample[] history)
+    public void Push(SystemSnapshot snapshot, AggregateSample[] history, HostDiagnostics diagnostics)
     {
         if (!_webReady)
             return;
@@ -50,6 +50,6 @@ public partial class DetailWindow : Window
         _lastSentProcesses = snapshot.Processes;
 
         Web.CoreWebView2.PostWebMessageAsJson(
-            WebBridge.BuildDetailPayload(snapshot, history, processes));
+            WebBridge.BuildDetailPayload(snapshot, history, processes, diagnostics));
     }
 }

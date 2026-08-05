@@ -110,6 +110,28 @@ button:hover {
     display: none;
 }
 
+/* Netzraten haben keine Obergrenze — statt eines Balkens zwei Zahlen. */
+.row.net {
+    grid-template-columns: 27px 34px 1fr 1fr;
+}
+
+.rate {
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.rate.down::before {
+    content: "↓ ";
+    color: var(--gpu);
+}
+
+.rate.up::before {
+    content: "↑ ";
+    color: var(--ram);
+}
+
 .row.stale .value,
 .row.stale .label {
     opacity: 0.35;
@@ -147,6 +169,8 @@ button:hover {
 .row[data-metric="cpu"] .fill { background: var(--cpu); }
 .row[data-metric="gpu"] .fill { background: var(--gpu); }
 .row[data-metric="ram"] .fill { background: var(--ram); }
+
+.row[data-metric="net"] .spark { opacity: 0.9; }
 
 .value {
     font-variant-numeric: tabular-nums;

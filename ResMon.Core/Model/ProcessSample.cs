@@ -12,4 +12,6 @@ public sealed record ProcessSample(
     double GpuPercent,
     IReadOnlyDictionary<string, double> GpuByEngineType,
     long GpuMemBytes,
-    IReadOnlyList<string> ServiceNames);
+    IReadOnlyList<string> ServiceNames,
+    double NetReceivedBytesPerSec,
+    double NetSentBytesPerSec);

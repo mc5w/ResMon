@@ -82,6 +82,12 @@ public sealed class ProcessSampler : IDisposable
     public bool Available => _cpu is not null && _pid is not null;
 
     /// <summary>
+    /// PIDs des letzten Toolhelp-Snapshots. Der Netz-Tracer räumt damit die
+    /// Zähler beendeter Prozesse ab.
+    /// </summary>
+    public IReadOnlySet<int> LivePids { get; private set; } = new HashSet<int>();
+
+    /// <summary>
     /// Verwirft das Aufwärm-Sample. Nach einer Pause (Detailfenster geschlossen)
     /// wären die CPU-Deltas sonst über die gesamte Pause gemittelt.
     /// </summary>
@@ -91,7 +97,9 @@ public sealed class ProcessSampler : IDisposable
     /// Holt ein Sample. Liefert beim ersten Aufruf nach <see cref="Restart"/> eine
     /// leere Liste, weil ratenbasierte Zähler ein Vorgänger-Sample brauchen.
     /// </summary>
-    public IReadOnlyList<ProcessSample> Sample(IReadOnlyDictionary<int, GpuProcessUsage> gpuByPid)
+    public IReadOnlyList<ProcessSample> Sample(
+        IReadOnlyDictionary<int, GpuProcessUsage> gpuByPid,
+        IReadOnlyDictionary<int, NetworkUsage> networkByPid)
     {
         if (!Available || !_query.Collect())
             return [];
@@ -112,7 +120,8 @@ public sealed class ProcessSampler : IDisposable
         var workingSet = ReadByInstance(_workingSet);
         var privateBytes = ReadByInstance(_privateBytes);
         Dictionary<int, ProcessTreeEntry> tree = Toolhelp.Snapshot();
-        _descriptions.Prune(tree.Keys);
+        LivePids = tree.Keys.ToHashSet();
+        _descriptions.Prune(LivePids);
 
         var samples = new List<ProcessSample>(pidByInstance.Count);
         foreach (PdhInstanceValue cpu in _cpu!.ReadArrayDouble(noCap100: true))
@@ -126,6 +135,7 @@ public sealed class ProcessSampler : IDisposable
 
             string name = ResolveName(cpu.Instance, pid, tree);
             GpuProcessUsage? gpu = gpuByPid.TryGetValue(pid, out GpuProcessUsage? usage) ? usage : null;
+            NetworkUsage network = networkByPid.GetValueOrDefault(pid);
             int? parentPid = tree.TryGetValue(pid, out ProcessTreeEntry entry) && entry.ParentPid != 0
                 ? entry.ParentPid
                 : null;
@@ -141,7 +151,9 @@ public sealed class ProcessSampler : IDisposable
                 gpu?.TotalPercent ?? 0,
                 gpu?.ByEngineType ?? NoEngines,
                 gpu?.MemBytes ?? 0,
-                _services.ForPid(pid)));
+                _services.ForPid(pid),
+                network.ReceivedBytesPerSec,
+                network.SentBytesPerSec));
         }
 
         return samples;
@@ -216,9 +228,8 @@ public sealed class ProcessSampler : IDisposable
         }
 
         /// <summary>Entfernt Einträge beendeter Prozesse, damit der Cache nicht unbegrenzt wächst.</summary>
-        public void Prune(IEnumerable<int> livePids)
+        public void Prune(IReadOnlySet<int> live)
         {
-            var live = livePids as HashSet<int> ?? [.. livePids];
             if (live.Count == 0)
                 return;
 

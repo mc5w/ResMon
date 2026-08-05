@@ -8,6 +8,7 @@
     --cpu: #60a5fa;
     --gpu: #4ade80;
     --ram: #fb923c;
+    --net: #a78bfa;
 }
 
 * {
@@ -35,8 +36,20 @@ body {
 
 .tiles {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     gap: 10px;
+}
+
+.tile[data-metric="net"] .big { color: var(--net); }
+
+.notice {
+    background: rgba(251, 191, 36, 0.10);
+    border: 1px solid rgba(251, 191, 36, 0.35);
+    color: #fcd34d;
+    border-radius: 8px;
+    padding: 7px 11px;
+    font-size: 12px;
+    line-height: 1.45;
 }
 
 .tile {
@@ -190,6 +203,63 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
+/* ---------- Spaltenauswahl ---------- */
+
+.menu {
+    position: relative;
+}
+
+.menu > button {
+    font: inherit;
+    color: var(--muted);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    padding: 6px 10px;
+    cursor: pointer;
+}
+
+.menu > button:hover {
+    color: var(--text);
+    border-color: var(--cpu);
+}
+
+/* display:flex würde das hidden-Attribut sonst überstimmen. */
+.menu-panel[hidden] {
+    display: none;
+}
+
+.menu-panel {
+    position: absolute;
+    z-index: 5;
+    top: calc(100% + 5px);
+    left: 0;
+    min-width: 190px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 7px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+}
+
+.menu-panel label {
+    padding: 4px 6px;
+    border-radius: 5px;
+    color: var(--text);
+}
+
+.menu-panel label:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.hint-bar {
+    font-size: 11px;
+    color: var(--muted);
+}
+
 /* ---------- Tabelle ---------- */
 
 .table-wrap {
@@ -246,8 +316,79 @@ tbody td.num {
     text-align: right;
 }
 
+tbody tr {
+    cursor: pointer;
+}
+
 tbody tr:hover {
     background: rgba(255, 255, 255, 0.035);
+}
+
+/* Angeheftete Zeilen stehen oben und bleiben dort, egal wie sortiert wird. */
+tbody tr.pinned {
+    background: rgba(96, 165, 250, 0.10);
+}
+
+tbody tr.pinned:hover {
+    background: rgba(96, 165, 250, 0.16);
+}
+
+tbody tr.pinned td:first-child {
+    box-shadow: inset 3px 0 0 var(--cpu);
+}
+
+td.note {
+    color: #fcd34d;
+    min-width: 110px;
+}
+
+td.note:empty::after {
+    content: "—";
+    color: var(--border);
+}
+
+.note-input {
+    width: 100%;
+    font: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--cpu);
+    border-radius: 4px;
+    padding: 2px 5px;
+}
+
+.note-input:focus {
+    outline: none;
+}
+
+/* ---------- Scrollbalken ---------- */
+
+.table-wrap {
+    scrollbar-width: thin;
+    scrollbar-color: #3a4150 transparent;
+}
+
+.table-wrap::-webkit-scrollbar {
+    width: 11px;
+    height: 11px;
+}
+
+.table-wrap::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.table-wrap::-webkit-scrollbar-thumb {
+    background: #3a4150;
+    border: 3px solid var(--panel);
+    border-radius: 6px;
+}
+
+.table-wrap::-webkit-scrollbar-thumb:hover {
+    background: #4d566a;
+}
+
+.table-wrap::-webkit-scrollbar-corner {
+    background: transparent;
 }
 
 .name-cell {

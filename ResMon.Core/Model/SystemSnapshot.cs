@@ -6,6 +6,7 @@ public sealed record SystemSnapshot(
     CpuMetrics Cpu,
     GpuMetrics Gpu,
     MemoryMetrics Memory,
+    NetworkMetrics Network,
     IReadOnlyList<ProcessSample> Processes);
 
 public sealed record CpuMetrics(
@@ -37,6 +38,15 @@ public sealed record MemoryMetrics(
     long CommittedBytes,
     double Percent);
 
+/// <summary>Netzdurchsatz über alle physischen Adapter, aus PDH.</summary>
+public sealed record NetworkMetrics(
+    double ReceivedBytesPerSec,
+    double SentBytesPerSec,
+    bool Available)
+{
+    public static readonly NetworkMetrics Empty = new(0, 0, false);
+}
+
 /// <summary>Verdichteter Eintrag für den Ringpuffer (DESIGN.md §10).</summary>
 public readonly record struct AggregateSample(
     DateTime Timestamp,
@@ -44,4 +54,6 @@ public readonly record struct AggregateSample(
     double GpuPercent,
     double MemoryPercent,
     double? CpuTempC,
-    double? GpuTempC);
+    double? GpuTempC,
+    double NetReceivedBytesPerSec,
+    double NetSentBytesPerSec);

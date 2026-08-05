@@ -21,9 +21,11 @@ public sealed class Collector : IDisposable
     private readonly PdhQuery _aggregateQuery = new();
     private readonly CounterSource _counters;
     private readonly GpuEngineSource _gpu;
+    private readonly NetworkSource _network;
     private readonly HardwareSource _hardware = new();
     private readonly ServiceResolver _services = new();
     private readonly ProcessSampler _processes;
+    private readonly NetworkTracer _networkTracer = new();
 
     private readonly Lock _aggregateGate = new();
     private readonly Lock _processGate = new();
@@ -49,6 +51,7 @@ public sealed class Collector : IDisposable
         _settings = settings;
         _counters = new CounterSource(_aggregateQuery);
         _gpu = new GpuEngineSource(_aggregateQuery);
+        _network = new NetworkSource(_aggregateQuery);
         _processes = new ProcessSampler(_services);
         History = new RingBuffer<AggregateSample>(HistoryCapacity);
     }
@@ -62,6 +65,18 @@ public sealed class Collector : IDisposable
     public string? HardwareError => _hardware.OpenError;
 
     public bool GpuCountersAvailable => _gpu.Available;
+
+    /// <summary>
+    /// Fehlermeldung, falls die ETW-Sitzung für den Netzverkehr pro Prozess nicht
+    /// startet. Die übrigen Spalten funktionieren dann weiter.
+    /// </summary>
+    public string? NetworkTraceError => _networkTracer.Error;
+
+    /// <summary>
+    /// True, wenn CPU-Sensoren zwar existieren, aber konstant 0 melden — typisch
+    /// für einen von der Speicherintegrität blockierten WinRing0-Treiber.
+    /// </summary>
+    public bool CpuSensorsBlocked => _lastHardware.CpuSensorsBlocked;
 
     /// <summary>
     /// Steuert die Prozess-Enumeration. Bleibt aus, solange das Detailfenster
@@ -86,6 +101,10 @@ public sealed class Collector : IDisposable
                 lock (_processGate)
                     _processes.Restart();
 
+                // Das Aufsetzen der ETW-Sitzung dauert einige hundert Millisekunden
+                // und würde das Öffnen des Detailfensters spürbar verzögern.
+                _ = Task.Run(_networkTracer.Start);
+
                 _serviceTimer?.Change(0, _settings.Intervals.ServiceMs);
                 _processTimer?.Change(0, _settings.Intervals.ProcessMs);
             }
@@ -93,6 +112,7 @@ public sealed class Collector : IDisposable
             {
                 _processTimer?.Change(Timeout.Infinite, Timeout.Infinite);
                 _serviceTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+                _networkTracer.Stop();
                 _lastProcesses = NoProcesses;
             }
         }
@@ -138,6 +158,7 @@ public sealed class Collector : IDisposable
         {
             CounterReading counters;
             GpuEngineReading gpu;
+            NetworkMetrics network;
             lock (_aggregateGate)
             {
                 // Das erste Sample nach dem Start liefert keine Deltas und wird verworfen.
@@ -146,6 +167,7 @@ public sealed class Collector : IDisposable
 
                 counters = _counters.Read();
                 gpu = _gpu.Read();
+                network = _network.Read();
             }
 
             _lastGpuByPid = gpu.ByProcess;
@@ -185,9 +207,11 @@ public sealed class Collector : IDisposable
                 gpuMetrics.TotalPercent,
                 memory.Percent,
                 cpu.PackageTempC,
-                gpuMetrics.TempC));
+                gpuMetrics.TempC,
+                network.ReceivedBytesPerSec,
+                network.SentBytesPerSec));
 
-            SnapshotReady?.Invoke(new SystemSnapshot(timestamp, cpu, gpuMetrics, memory, _lastProcesses));
+            SnapshotReady?.Invoke(new SystemSnapshot(timestamp, cpu, gpuMetrics, memory, network, _lastProcesses));
         }
         finally
         {
@@ -219,7 +243,10 @@ public sealed class Collector : IDisposable
         {
             IReadOnlyList<ProcessSample> samples;
             lock (_processGate)
-                samples = _processes.Sample(_lastGpuByPid);
+            {
+                samples = _processes.Sample(_lastGpuByPid, _networkTracer.Read());
+                _networkTracer.Prune(_processes.LivePids);
+            }
 
             // Leere Liste heißt "Aufwärm-Sample" — den vorherigen Stand behalten.
             if (samples.Count > 0)
@@ -253,6 +280,8 @@ public sealed class Collector : IDisposable
         _hardwareTimer?.Dispose();
         _processTimer?.Dispose();
         _serviceTimer?.Dispose();
+
+        _networkTracer.Dispose();
 
         lock (_processGate)
             _processes.Dispose();

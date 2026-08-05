@@ -27,6 +27,7 @@ public sealed class VisibilitySettings
     public bool Cpu { get; set; } = true;
     public bool Gpu { get; set; } = true;
     public bool Ram { get; set; } = true;
+    public bool Net { get; set; } = true;
     public bool Temps { get; set; } = true;
 }
 

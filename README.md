@@ -42,10 +42,20 @@ Tray-Icon. Bedienung:
 
 - **Kopfzeile ziehen** — Overlay verschieben, Position wird gespeichert
 - **Mausrad über der Karte** — Deckkraft ändern
-- **Details** — Prozessfenster öffnen (erst dann läuft die Prozess-Enumeration)
+- **Details** — Prozessfenster öffnen (erst dann laufen Prozess-Enumeration und ETW)
 - **Tray-Menü** — Deckkraft, sichtbare Zeilen, Klick-Durchlässigkeit, Autostart, Beenden
 
-Einstellungen liegen in `%AppData%\ResMon\settings.json`.
+Im Detailfenster:
+
+- **Klick auf eine Zeile** heftet den Prozess oben an. Angeheftete Zeilen bleiben
+  dort stehen, überstehen den Filter und wandern beim Sortieren nicht mehr
+- **Doppelklick auf die Notizspalte** öffnet ein Eingabefeld. Notizen hängen am
+  Prozessnamen und bleiben über Neustarts erhalten
+- **Spalten ▾** blendet Spalten ein und aus
+
+Einstellungen liegen in `%AppData%\ResMon\settings.json`. Spaltenauswahl und
+Notizen liegen im `localStorage` der WebView unter
+`%LocalAppData%\ResMon\WebView2`.
 
 ## Diagnose
 
@@ -82,3 +92,31 @@ Zusätzlich liefert LibreHardwareMonitor bei NVIDIA-Karten neben
 `GPU Memory Used` auch `D3D Dedicated Memory Used`; für den VRAM-Wert wird
 gezielt der erste Sensor gewählt, sonst wird nur ein Teil des belegten Speichers
 angezeigt.
+
+## CPU-Temperatur und Speicherintegrität
+
+Ist die **Speicherintegrität** (Kernisolierung) oder die **Sperrliste für
+verwundbare Treiber** aktiv, lädt LibreHardwareMonitors Kernel-Treiber
+`WinRing0` nicht — er steht auf Microsofts Sperrliste. Die CPU-Sensoren
+existieren dann zwar, melden aber konstant 0.
+
+ResMon erkennt das und zeigt „–" statt einer erfundenen Null; das Detailfenster
+blendet einen Hinweis ein. GPU-Werte kommen über NVAPI im User-Mode und sind
+nicht betroffen. Zu prüfen ist der Zustand mit:
+
+```bash
+reg query "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" /v Enabled
+```
+
+Die Speicherintegrität abzuschalten würde die Temperaturanzeige aktivieren,
+senkt aber das Schutzniveau des Systems spürbar. Das ist eine bewusste
+Abwägung — ResMon nimmt sie niemandem ab.
+
+## Netzwerk
+
+Der Gesamtdurchsatz kommt aus `\Network Interface` über PDH und ist immer
+verfügbar. Der Durchsatz **pro Prozess** stammt aus einer Kernel-ETW-Sitzung
+(`Microsoft.Diagnostics.Tracing.TraceEvent`, Keyword `NetworkTCPIP`) — PDH kennt
+dafür keine Zähler. Die Sitzung läuft nur, solange das Detailfenster offen ist,
+und erfordert Administratorrechte. Ohne sie bleiben die Spalten leer und das
+Detailfenster nennt den Grund.
