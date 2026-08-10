@@ -101,8 +101,15 @@ ResMon.Probe\bin\x64\Release\net9.0\ResMon.Probe.exe sensors
 | `paths` | Welche der benötigten PDH-Zählerpfade dieses System kennt |
 
 Für die Arbeit an der Oberfläche ohne Elevation lässt sich `wwwroot` als
-statische Seite ausliefern; die Seiten rendern dann
-ohne Daten, `render(…)` bzw. `renderTiles(…)` lassen sich in der Konsole füttern.
+statische Seite ausliefern, etwa mit
+
+```bash
+python -m http.server 8123 --directory ResMon.App/wwwroot
+```
+
+Die Seiten rendern dann ohne Daten; `renderTiles(…)`, `renderTable()` und die
+übrigen Zeichenfunktionen lassen sich in der Konsole des Browsers von Hand
+füttern.
 
 ## Abweichungen vom Entwurfsdokument
 
