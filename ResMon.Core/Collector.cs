@@ -17,6 +17,7 @@ public sealed class Collector : IDisposable
     public const int HistoryCapacity = 300;
 
     private static readonly IReadOnlyList<ProcessSample> NoProcesses = [];
+    private static readonly IReadOnlyList<NetConnection> NoConnections = [];
 
     private readonly AppSettings _settings;
     private readonly PdhQuery _aggregateQuery = new();
@@ -26,6 +27,7 @@ public sealed class Collector : IDisposable
     private readonly DiskSource _disk;
     private readonly HardwareSource _hardware = new();
     private readonly ServiceResolver _services = new();
+    private readonly AppErrorLog _faults = new();
     private readonly ProcessSampler _processes;
     private readonly NetworkTracer _networkTracer = new();
 
@@ -39,6 +41,7 @@ public sealed class Collector : IDisposable
 
     private volatile HardwareReading _lastHardware = HardwareReading.Empty;
     private volatile IReadOnlyList<ProcessSample> _lastProcesses = NoProcesses;
+    private volatile IReadOnlyList<NetConnection> _lastConnections = NoConnections;
     private IReadOnlyDictionary<int, GpuProcessUsage> _lastGpuByPid = new Dictionary<int, GpuProcessUsage>();
 
     private int _aggregateBusy;
@@ -55,7 +58,7 @@ public sealed class Collector : IDisposable
         _gpu = new GpuEngineSource(_aggregateQuery);
         _network = new NetworkSource(_aggregateQuery);
         _disk = new DiskSource(_aggregateQuery);
-        _processes = new ProcessSampler(_services);
+        _processes = new ProcessSampler(_services, _faults);
         History = new RingBuffer<AggregateSample>(HistoryCapacity);
 
         // WMI ist langsam; die Übersicht wird einmalig im Hintergrund erhoben.
@@ -97,6 +100,13 @@ public sealed class Collector : IDisposable
     public bool CpuSensorsBlocked => _lastHardware.CpuSensorsBlocked;
 
     /// <summary>
+    /// True, wenn der Super-I/O-Chip des Mainboards nicht erreichbar ist —
+    /// Sockeltemperatur und Gehäuselüfter fehlen dann. Erst nach dem ersten
+    /// Hardware-Takt aussagekräftig.
+    /// </summary>
+    public bool BoardSensorsMissing => !_lastHardware.BoardSensorsAvailable;
+
+    /// <summary>
     /// Steuert die Prozess-Enumeration. Bleibt aus, solange das Detailfenster
     /// geschlossen ist — sie ist der teuerste Teil der Erfassung (DESIGN.md §9).
     /// </summary>
@@ -132,6 +142,7 @@ public sealed class Collector : IDisposable
                 _serviceTimer?.Change(Timeout.Infinite, Timeout.Infinite);
                 _networkTracer.Stop();
                 _lastProcesses = NoProcesses;
+                _lastConnections = NoConnections;
             }
         }
     }
@@ -196,9 +207,15 @@ public sealed class Collector : IDisposable
             var cpu = new CpuMetrics(
                 counters.CpuTotalPercent,
                 counters.CpuPerCorePercent,
-                hardware.CpuPackageTempC,
+                // Ohne Die-Temperatur ist die Sockeltemperatur die beste Auskunft,
+                // die es gibt — sie kommt vom Mainboard und überlebt einen
+                // gesperrten Sensortreiber.
+                hardware.CpuPackageTempC ?? hardware.CpuSocketTempC,
                 hardware.CpuClockMhz,
-                hardware.CpuPackagePowerW);
+                hardware.CpuPackagePowerW)
+            {
+                SocketTempC = hardware.CpuSocketTempC,
+            };
 
             // Fällt der PDH-Zählersatz aus, springt die LHM-Last als Ersatz ein.
             double gpuPercent = _gpu.Available ? gpu.TotalPercent : hardware.GpuLoadPercent ?? 0;
@@ -220,6 +237,16 @@ public sealed class Collector : IDisposable
                 counters.CommittedBytes,
                 counters.MemoryPercent);
 
+            var energy = new EnergyMetrics(
+                hardware.CpuPackagePowerW,
+                hardware.GpuPowerW,
+                hardware.Rails,
+                hardware.Fans,
+                hardware.Battery)
+            {
+                Temperatures = hardware.Temperatures,
+            };
+
             var timestamp = DateTime.Now;
             History.Add(new AggregateSample(
                 timestamp,
@@ -231,10 +258,22 @@ public sealed class Collector : IDisposable
                 network.ReceivedBytesPerSec,
                 network.SentBytesPerSec,
                 disk.ReadBytesPerSec,
-                disk.WriteBytesPerSec));
+                disk.WriteBytesPerSec)
+            {
+                CpuPowerW = energy.CpuPackagePowerW ?? 0,
+                GpuPowerW = energy.GpuPowerW ?? 0,
+            });
 
             SnapshotReady?.Invoke(new SystemSnapshot(
-                timestamp, cpu, gpuMetrics, memory, network, disk, _lastProcesses));
+                timestamp, cpu, gpuMetrics, memory, network, disk, _lastProcesses)
+            {
+                // Zwei int-Felder aus dem Prozess-Takt; für die Anzeige ist ein
+                // Takt Versatz belanglos, deshalb ohne Sperre gelesen.
+                ProcessCount = _processes.ProcessCount,
+                ThreadCount = _processes.ThreadCount,
+                Energy = energy,
+                Connections = _lastConnections,
+            });
         }
         finally
         {
@@ -264,10 +303,18 @@ public sealed class Collector : IDisposable
 
         try
         {
+            // Die Verbindungstabelle liefert zugleich die Ports je Prozess; sie
+            // steht deshalb vor der Prozesserfassung.
+            IReadOnlyList<NetConnection> connections = ConnectionSource.Read();
+            _lastConnections = connections;
+
             IReadOnlyList<ProcessSample> samples;
             lock (_processGate)
             {
-                samples = _processes.Sample(_lastGpuByPid, _networkTracer.Read());
+                samples = _processes.Sample(
+                    _lastGpuByPid,
+                    _networkTracer.Read(),
+                    ConnectionSource.ByProcess(connections));
                 _networkTracer.Prune(_processes.LivePids);
             }
 
@@ -289,6 +336,10 @@ public sealed class Collector : IDisposable
         try
         {
             _services.Refresh();
+
+            // Beides ist zu langsam für den Prozess-Takt und ändert sich selten;
+            // der 30-Sekunden-Takt trägt sie gemeinsam.
+            _faults.Refresh();
         }
         finally
         {

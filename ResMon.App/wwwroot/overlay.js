@@ -40,12 +40,77 @@ document.getElementById('grip').addEventListener('mousedown', event => {
 document.getElementById('btn-detail').addEventListener('click', () => send('openDetail'));
 document.getElementById('btn-close').addEventListener('click', () => send('close'));
 
-// Mausrad auf der Karte regelt die Deckkraft.
+// ---------- Einstellungen ----------
+
+const root = document.documentElement;
+const card = document.querySelector('.card');
+
+// Der Host hat die Hoheit über diese Werte; hier stehen sie nur, damit die
+// Mausrad-Schritte auf dem aktuellen Stand aufsetzen und nicht springen.
 let opacity = 0.9;
+let scale = 1;
+
+function applySettings(data) {
+    if (!data) {
+        return;
+    }
+    if (data.theme) {
+        root.dataset.theme = data.theme;
+    }
+    if (data.overlay) {
+        opacity = data.overlay.opacity;
+        scale = data.overlay.scale;
+        // Nur der Kartenhintergrund wird durchsichtig, nicht die Schrift darauf.
+        root.style.setProperty('--card-alpha', String(opacity));
+        // Blendet die Hinweisleiste mit der Tastenkombination ein.
+        root.dataset.clickthrough = data.overlay.clickThrough ? '1' : '';
+    }
+}
+
+const passthroughText = document.getElementById('passthrough-text');
+
+/**
+ * Der Notausstieg wird gehalten: das Overlay nimmt gerade Klicks an. Die Leiste
+ * sagt dann, dass es geklappt hat — sonst hielte man die Tasten und wüsste
+ * nicht, ob es reicht.
+ */
+function applyBypass(active) {
+    root.dataset.bypass = active ? '1' : '';
+    passthroughText.textContent = active ? 'gehalten – Fenster ist klickbar' : 'halten zum Klicken';
+}
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+// Mausrad regelt die Deckkraft, mit Strg die Größe.
 document.addEventListener('wheel', event => {
-    opacity = Math.min(1, Math.max(0.2, opacity + (event.deltaY < 0 ? 0.05 : -0.05)));
-    send('setOpacity', { value: Number(opacity.toFixed(2)) });
+    const up = event.deltaY < 0;
+    if (event.ctrlKey) {
+        scale = clamp(scale + (up ? 0.1 : -0.1), 0.8, 2.5);
+        send('setScale', { value: Number(scale.toFixed(2)) });
+    } else {
+        opacity = clamp(opacity + (up ? 0.05 : -0.05), 0.2, 1);
+        send('setOpacity', { value: Number(opacity.toFixed(2)) });
+    }
 }, { passive: true });
+
+// ---------- Fenstergröße ----------
+
+// Der Host kann die nötige Höhe nicht ausrechnen — sie hängt daran, welche
+// Zeilen eingeblendet sind. Also misst die Seite und meldet sie; das Fenster ist
+// damit immer genau so hoch wie sein Inhalt.
+let reportedHeight = 0;
+
+function reportSize() {
+    // Ein Pixel Zugabe: bei gebrochener Skalierung schnitte die Karte sonst am
+    // unteren Rand ihre eigene Umrandung ab.
+    const height = Math.ceil(card.getBoundingClientRect().height) + 9;
+    if (height !== reportedHeight && height > 0) {
+        reportedHeight = height;
+        send('size', { value: height });
+    }
+}
+
+new ResizeObserver(reportSize).observe(card);
 
 function formatPercent(value) {
     return value === null || value === undefined ? '–' : `${value.toFixed(0)} %`;
@@ -176,8 +241,17 @@ function render(data) {
 if (host) {
     host.addEventListener('message', event => {
         const data = event.data;
-        if (data && data.type === 'overlay') {
+        if (!data) {
+            return;
+        }
+        if (data.type === 'overlay') {
             render(data);
+        } else if (data.type === 'settings') {
+            applySettings(data);
+        } else if (data.type === 'bypass') {
+            // Klick-durchlässig, aber gerade doch bedienbar: ohne sichtbares
+            // Zeichen wüsste niemand, dass der Griff jetzt sitzt.
+            applyBypass(data.active);
         }
     });
 }

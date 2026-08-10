@@ -13,6 +13,7 @@ Umsetzung von [DESIGN.md](DESIGN.md).
 | `ResMon.Core` | Erfassung: PDH-P/Invoke, LibreHardwareMonitor, Prozess- und Dienstauflösung, Collector |
 | `ResMon.App` | WPF-Host mit WebView2-Oberfläche, Overlay, Detailfenster, Tray-Icon |
 | `ResMon.Probe` | Konsolen-Diagnose für die Rohdaten (Kontrollpunkt aus DESIGN.md §15) |
+| `tools/` | `make-icon.ps1` erzeugt `ResMon.App/ResMon.ico` — dort steht auch die Form des Symbols |
 
 ## Voraussetzungen
 
@@ -45,12 +46,25 @@ Tray-Icon. Bedienung:
 - **Details** — Prozessfenster öffnen (erst dann laufen Prozess-Enumeration und ETW)
 - **Tray-Menü** — Deckkraft, sichtbare Zeilen, Klick-Durchlässigkeit, Autostart, Beenden
 
-Im Detailfenster:
+Das Detailfenster hat sechs Reiter:
 
-- **Reiter Prozesse / System** — Prozesstabelle oder Übersicht über Betriebssystem,
-  CPU, Grafik, Arbeitsspeicher, Mainboard und die Datenträger samt Laufwerken
+| Reiter | Inhalt |
+|---|---|
+| **Prozesse** | Prozesstabelle mit Verlaufsdiagramm, fest nach Apps, Hintergrund- und Windows-Prozessen gegliedert |
+| **Energie** | Leistungsaufnahme, Temperaturen, Lüfter, Akku und der Energieeinfluss je Prozess |
+| **Verbindungen** | Übersicht der offenen Ports und darunter die vollständige TCP/UDP-Tabelle |
+| **System** | Betriebssystem, Laufzeit, CPU samt Cache-Ebenen, Grafik, Arbeitsspeicher, Mainboard, Geräte und Datenträger |
+| **Logs** | Was gerade *nicht* ausgelesen werden kann und warum — Zählersätze, Sensortreiber, gefangene Fehler |
+| **Einstellungen** | Farbschema, Deckkraft und Größe des Overlays, sichtbare Zeilen, Reihen des Diagramms |
+
+Bedienung der Tabellen:
+
 - **Klick auf eine Zeile** heftet den Prozess oben an. Angeheftete Zeilen bleiben
   dort stehen, überstehen den Filter und wandern beim Sortieren nicht mehr
+- **Klick auf eine Abschnittsüberschrift** klappt den Abschnitt zu, etwa wenn die
+  Hintergrundprozesse gerade nicht interessieren
+- **Rechte Kante einer Spaltenüberschrift ziehen** ändert die Spaltenbreite,
+  Doppelklick setzt sie zurück; **Überschrift ziehen** verschiebt die Spalte
 - **Dreieck vor dem Namen** klappt einen zusammengefassten Prozessbaum auf: der
   Elternprozess bleibt oben, darunter erscheinen sein eigener Anteil und die
   Kindprozesse, nach Abstand zum Elternprozess eingerückt
@@ -63,9 +77,12 @@ Im Detailfenster:
   dasselbe gilt für die GPU-Engine-Chips in der GPU-Kachel
 - Meldungen über fehlende Zähler lassen sich per ✕ dauerhaft ausblenden
 
-Einstellungen liegen in `%AppData%\ResMon\settings.json`. Spaltenauswahl und
-Notizen liegen im `localStorage` der WebView unter
-`%LocalAppData%\ResMon\WebView2`.
+Sechs Farbschemata (dunkel, hell, blau, rot, grün, sepia) gelten für beide
+Fenster einschließlich Titelleiste und Rahmen.
+
+Einstellungen liegen in `%AppData%\ResMon\settings.json`. Spaltenauswahl,
+Spaltenbreiten, zugeklappte Abschnitte und Notizen liegen im `localStorage` der
+WebView unter `%LocalAppData%\ResMon\WebView2`.
 
 ## Diagnose
 
@@ -159,3 +176,17 @@ zusammen —, sind also nicht deckungsgleich mit dem reinen Datenträgerzugriff.
 Sie sind dafür immer korrekt dem verursachenden Prozess zugeordnet, was für
 Datenträger-Ereignisse aus ETW nicht durchgängig gilt. Der reine
 Datenträgerdurchsatz steht in der Kachel oben.
+
+## Lizenz
+
+[MIT](LICENSE).
+
+Die eingebundenen Pakete stehen unter ihren eigenen Lizenzen und werden über
+NuGet bezogen, nicht mitgeliefert:
+
+| Paket | Lizenz |
+|---|---|
+| LibreHardwareMonitorLib | MPL-2.0 |
+| Microsoft.Diagnostics.Tracing.TraceEvent | MIT |
+| Microsoft.Web.WebView2 | Microsoft Software License |
+| System.Management, System.Diagnostics.EventLog | MIT |

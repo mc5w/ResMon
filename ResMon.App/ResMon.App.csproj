@@ -13,6 +13,9 @@
     <RootNamespace>ResMon.App</RootNamespace>
     <AssemblyName>ResMon</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Symbol der Exe: Explorer, angeheftete Verknüpfungen und der Fenster-
+         rahmen greifen darauf zu. Erzeugt von tools\make-icon.ps1. -->
+    <ApplicationIcon>ResMon.ico</ApplicationIcon>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <!-- WPF und WinForms im selben Prozess: das Tray-Icon kommt von NotifyIcon.
          WFO0003 verlangt, DPI-Awareness über die WinForms-API zu setzen — hier
@@ -34,6 +37,10 @@
     <Content Include="wwwroot\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+
+    <!-- Dasselbe Symbol noch einmal als Ressource: Tray-Icon und Fenster laden
+         daraus zur Laufzeit die jeweils passende Auflösung. -->
+    <Resource Include="ResMon.ico" />
   </ItemGroup>
 
 </Project>

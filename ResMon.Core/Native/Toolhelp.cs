@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 namespace ResMon.Core.Native;
 
 /// <summary>Ein Eintrag aus dem Toolhelp-Snapshot.</summary>
-public readonly record struct ProcessTreeEntry(int Pid, int ParentPid, string ExeName);
+public readonly record struct ProcessTreeEntry(int Pid, int ParentPid, string ExeName, int ThreadCount);
 
 /// <summary>
 /// Prozessbaum über <c>CreateToolhelp32Snapshot</c>. Deutlich schneller als
@@ -63,7 +63,11 @@ public static class Toolhelp
             do
             {
                 int pid = (int)entry.th32ProcessID;
-                result[pid] = new ProcessTreeEntry(pid, (int)entry.th32ParentProcessID, entry.szExeFile ?? string.Empty);
+                result[pid] = new ProcessTreeEntry(
+                    pid,
+                    (int)entry.th32ParentProcessID,
+                    entry.szExeFile ?? string.Empty,
+                    (int)entry.cntThreads);
             }
             while (Process32NextW(snapshot, ref entry));
         }

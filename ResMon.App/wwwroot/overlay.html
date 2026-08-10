@@ -9,6 +9,21 @@
 <body>
     <div class="card">
         <header id="grip">
+            <!-- Dieselbe Form wie das Anwendungssymbol; die Punktliste steht in
+                 tools\make-icon.ps1. Der Farbverlauf greift die Kachelfarben auf,
+                 damit die Marke in jedem Schema gleich aussieht. -->
+            <svg class="mark" viewBox="-3 11 70 39" aria-hidden="true" focusable="false">
+                <defs>
+                    <linearGradient id="mark-gradient" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stop-color="#60a5fa"/>
+                        <stop offset="50%" stop-color="#4ade80"/>
+                        <stop offset="100%" stop-color="#fb923c"/>
+                    </linearGradient>
+                </defs>
+                <path d="M0 46H9V15L20 20L9 26L19 46H33L36 33L27 31L30 17H39L44 46H47V15L53 30L59 15V46H64"
+                      fill="none" stroke="url(#mark-gradient)" stroke-width="5"
+                      stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
             <span class="brand">ResMon</span>
             <span class="spacer"></span>
             <button id="btn-close" title="Beenden" aria-label="Beenden">&#10005;</button>
@@ -54,6 +69,14 @@
             <span id="ram-detail" class="hint">–</span>
             <button id="btn-detail">Details</button>
         </footer>
+
+        <!-- Nur sichtbar, solange das Overlay klick-durchlässig ist. Ohne diesen
+             Hinweis wäre die Karte stumm: Klicks gehen hindurch, und woran das
+             liegt, steht nirgends. -->
+        <div class="passthrough" id="passthrough">
+            <span class="chord"><b>Strg</b>+<b>Umschalt</b></span>
+            <span class="chord-text" id="passthrough-text">halten zum Klicken</span>
+        </div>
     </div>
 
     <script src="overlay.js"></script>

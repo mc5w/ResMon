@@ -1,8 +1,10 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using ResMon.Core.Config;
+using ResMon.Core.Diagnostics;
 using ResMon.Core.Inventory;
 using ResMon.Core.Model;
+using ResMon.Core.Processes;
 
 namespace ResMon.App.Bridge;
 
@@ -17,7 +19,20 @@ public readonly record struct HostDiagnostics(
     bool DiskCountersMissing,
     bool ProcessCountersMissing,
     bool LegacyProcessCounters,
-    string? NetworkTraceError);
+    string? NetworkTraceError)
+{
+    /// <summary>Kein Zugriff auf den Super-I/O-Chip: keine Sockeltemperatur, keine Gehäuselüfter.</summary>
+    public bool BoardSensorsMissing { get; init; }
+
+    /// <summary>Fehlermeldung, falls sich die Sensorbibliothek nicht öffnen ließ.</summary>
+    public string? SensorDriverError { get; init; }
+
+    /// <summary>
+    /// Ob der Prozess erhöht läuft. Ohne Adminrechte fehlen Sensortreiber und
+    /// ETW-Sitzung — im Reiter „Logs" ist das die erste Frage.
+    /// </summary>
+    public bool Elevated { get; init; }
+}
 
 /// <summary>Ein von der Oberfläche gesendetes Kommando (DESIGN.md §12).</summary>
 public sealed class WebCommand
@@ -26,6 +41,11 @@ public sealed class WebCommand
     public double? Value { get; set; }
     public int? Pid { get; set; }
     public string? Name { get; set; }
+
+    /// <summary>Benennt bei Einstellungen die betroffene Reihe, etwa "gpu" oder "net".</summary>
+    public string? Key { get; set; }
+
+    public bool? On { get; set; }
 }
 
 /// <summary>
@@ -40,10 +60,21 @@ public static class WebBridge
         PropertyNameCaseInsensitive = true,
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals,
+        // Prozessart und Verbindungszustand gehen als sprechende Namen an die
+        // Seite; als Zahlen müsste die Oberfläche die Aufzählung nachbilden.
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
     /// <summary>Anzahl Punkte der Sparklines im Overlay.</summary>
     private const int OverlayHistoryPoints = 60;
+
+    /// <summary>
+    /// Obergrenze für die Verbindungstabelle. Auf einem Rechner mit viel
+    /// Netzverkehr stehen dort schnell mehrere tausend Einträge; darüber hinaus
+    /// ist die Liste ohnehin nicht mehr zu lesen und würde nur die Nachricht
+    /// aufblähen.
+    /// </summary>
+    private const int MaxConnections = 2000;
 
     public static WebCommand? ParseCommand(string json)
     {
@@ -58,7 +89,10 @@ public static class WebBridge
     }
 
     /// <summary>Schlanke Nutzlast für das Overlay — ohne Prozessliste.</summary>
-    public static string BuildOverlayPayload(SystemSnapshot snapshot, AggregateSample[] history, VisibilitySettings visible)
+    public static string BuildOverlayPayload(
+        SystemSnapshot snapshot,
+        AggregateSample[] history,
+        VisibilitySettings visible)
     {
         var payload = new
         {
@@ -132,8 +166,12 @@ public static class WebBridge
         SystemSnapshot snapshot,
         AggregateSample[] history,
         IReadOnlyList<ProcessSample>? processes,
-        HostDiagnostics diagnostics)
+        IReadOnlyList<NetConnection>? connections,
+        HostDiagnostics diagnostics,
+        IReadOnlyList<DiagnosticEntry>? logs)
     {
+        BatteryMetrics? battery = snapshot.Energy.Battery;
+
         var payload = new
         {
             type = "detail",
@@ -142,6 +180,7 @@ public static class WebBridge
             {
                 percent = Round(snapshot.Cpu.TotalPercent),
                 tempC = Round(snapshot.Cpu.PackageTempC),
+                socketTempC = Round(snapshot.Cpu.SocketTempC),
                 clockMhz = Round(snapshot.Cpu.ClockMhz, 0),
                 powerW = Round(snapshot.Cpu.PackagePowerW),
                 cores = snapshot.Cpu.PerCorePercent.Select(c => Round(c, 0)).ToArray(),
@@ -189,12 +228,79 @@ public static class WebBridge
                 processCountersMissing = diagnostics.ProcessCountersMissing,
                 legacyProcessCounters = diagnostics.LegacyProcessCounters,
                 networkTraceError = diagnostics.NetworkTraceError,
+                boardSensorsMissing = diagnostics.BoardSensorsMissing,
+                sensorDriverError = diagnostics.SensorDriverError,
+                elevated = diagnostics.Elevated,
+            },
+            // Null, solange sich am Protokoll nichts geändert hat — es steht
+            // meistens still, und die Seite behält ihren Stand.
+            logs = logs?.Select(entry => new
+            {
+                source = entry.Source,
+                message = entry.Message,
+                severity = entry.Severity,
+                first = entry.First,
+                last = entry.Last,
+                count = entry.Count,
+            }).ToArray(),
+            system = new
+            {
+                processes = snapshot.ProcessCount,
+                threads = snapshot.ThreadCount,
+            },
+            energy = new
+            {
+                cpuW = Round(snapshot.Energy.CpuPackagePowerW),
+                gpuW = Round(snapshot.Energy.GpuPowerW),
+                measuredW = Round(snapshot.Energy.MeasuredW),
+                rails = snapshot.Energy.Rails
+                    .OrderByDescending(r => r.Watts)
+                    .Select(r => new { hardware = r.Hardware, name = r.Name, watts = Round(r.Watts) })
+                    .ToArray(),
+                fans = snapshot.Energy.Fans
+                    .Select(f => new
+                    {
+                        hardware = f.Hardware,
+                        name = f.Name,
+                        rpm = Round(f.Rpm, 0),
+                        percent = Round(f.Percent, 0),
+                    })
+                    .ToArray(),
+                temperatures = snapshot.Energy.Temperatures
+                    .Select(t => new
+                    {
+                        hardware = t.Hardware,
+                        name = t.Name,
+                        celsius = Round(t.Celsius),
+                        source = t.Source,
+                    })
+                    .ToArray(),
+                battery = battery is null ? null : new
+                {
+                    percent = Round(battery.ChargePercent),
+                    onAc = battery.OnAcPower,
+                    charging = battery.Charging,
+                    rateW = Round(battery.RateW),
+                    voltageV = Round(battery.VoltageV, 2),
+                    designedWh = Round(battery.DesignedCapacityWh),
+                    fullWh = Round(battery.FullChargedCapacityWh),
+                    remainingWh = Round(battery.RemainingCapacityWh),
+                    degradation = Round(battery.DegradationPercent),
+                    // Minuten statt einer Zeitspanne: die Seite formatiert selbst.
+                    remainingMinutes = battery.Remaining is { } left ? (int)left.TotalMinutes : (int?)null,
+                },
             },
             history = new
             {
                 cpu = Series(history, history.Length, s => s.CpuPercent),
                 gpu = Series(history, history.Length, s => s.GpuPercent),
                 ram = Series(history, history.Length, s => s.MemoryPercent),
+                // Raten ohne feste Obergrenze; das Diagramm skaliert sie auf ihr
+                // eigenes Maximum und schreibt es an die Legende.
+                net = Series(history, history.Length, s => s.NetReceivedBytesPerSec + s.NetSentBytesPerSec, digits: 0),
+                disk = Series(history, history.Length, s => s.DiskReadBytesPerSec + s.DiskWriteBytesPerSec, digits: 0),
+                cpuPower = Series(history, history.Length, s => s.CpuPowerW),
+                gpuPower = Series(history, history.Length, s => s.GpuPowerW),
                 seconds = history.Length,
             },
             processes = processes?.Select(p => new
@@ -217,22 +323,105 @@ public static class WebBridge
                 ioRead = Round(p.IoReadBytesPerSec, 0),
                 ioWrite = Round(p.IoWriteBytesPerSec, 0),
                 path = p.ImagePath,
+                threads = p.ThreadCount,
+                user = p.UserName,
+                category = p.Category,
+                window = p.WindowTitle,
+                hung = p.NotResponding,
+                fault = p.FaultNote,
+                tcpPorts = p.ListeningTcpPorts,
+                udpPorts = p.ListeningUdpPorts,
+                connections = p.ConnectionCount,
             }).ToArray(),
+            connections = connections?.Take(MaxConnections).Select(c => new
+            {
+                protocol = c.Protocol,
+                local = c.LocalAddress,
+                localPort = c.LocalPort,
+                remote = c.RemoteAddress,
+                remotePort = c.RemotePort,
+                state = c.State,
+                pid = c.Pid,
+            }).ToArray(),
+            connectionTotal = connections?.Count,
         };
 
         return JsonSerializer.Serialize(payload, Options);
     }
 
-    /// <summary>Die Systemübersicht wird einmalig gesendet — sie ändert sich nicht.</summary>
+    /// <summary>
+    /// Der vollständige Einstellungsstand, für beide Fenster identisch. Er geht
+    /// nach jeder Änderung sofort raus — an das Overlay, damit es sich anpasst,
+    /// und an das Detailfenster, damit die Einstellungsseite den Stand zeigt,
+    /// auch wenn er aus dem Tray-Menü kam.
+    /// </summary>
+    public static string BuildSettingsPayload(AppSettings settings)
+    {
+        var payload = new
+        {
+            type = "settings",
+            theme = settings.Theme,
+            overlay = new
+            {
+                opacity = settings.Overlay.Opacity,
+                scale = settings.Overlay.Scale,
+                clickThrough = settings.Overlay.ClickThrough,
+            },
+            visible = new
+            {
+                cpu = settings.Visible.Cpu,
+                gpu = settings.Visible.Gpu,
+                ram = settings.Visible.Ram,
+                net = settings.Visible.Net,
+                disk = settings.Visible.Disk,
+                temps = settings.Visible.Temps,
+            },
+            chart = new
+            {
+                cpu = settings.Chart.Cpu,
+                gpu = settings.Chart.Gpu,
+                ram = settings.Chart.Ram,
+                net = settings.Chart.Net,
+                disk = settings.Chart.Disk,
+            },
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>
+    /// Meldet dem Overlay, dass es gerade trotz Klick-Durchlässigkeit bedienbar
+    /// ist, weil der Notausstieg gehalten wird.
+    /// </summary>
+    public static string BuildBypassPayload(bool active)
+        => JsonSerializer.Serialize(new { type = "bypass", active }, Options);
+
+    /// <summary>
+    /// Die Systemübersicht. Der feste Teil ändert sich nicht, die Geräte schon —
+    /// deshalb kann die Seite eine neue Erhebung anfordern.
+    /// </summary>
     public static string BuildSystemPayload(SystemInfo info)
     {
         var payload = new
         {
             type = "system",
+            collectedAt = info.CollectedAt,
             groups = info.Groups.Select(group => new
             {
                 title = group.Title,
-                items = group.Items.Select(item => new { label = item.Label, value = item.Value }),
+                items = group.Items.Select(item => new { label = item.Label, value = item.Value, help = item.Help }),
+            }),
+            devices = info.Devices.Select(group => new
+            {
+                title = group.Title,
+                hint = group.Hint,
+                items = group.Items.Select(device => new
+                {
+                    name = device.Name,
+                    status = device.Status,
+                    health = device.Health,
+                    details = device.Details.Select(item => new { label = item.Label, value = item.Value }),
+                }),
             }),
             drives = info.Drives.Select(drive => new
             {

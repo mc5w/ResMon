@@ -10,3 +10,8 @@
 *.js      text
 *.json    text
 *.md      text
+*.ps1     text
+
+# Das Anwendungssymbol ist erzeugt (tools\make-icon.ps1) und muss Byte für Byte
+# so bleiben, wie es geschrieben wurde — jede Zeilenendenwandlung zerstört es.
+*.ico     binary

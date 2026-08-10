@@ -1,15 +1,36 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ResMon.Core.Diagnostics;
 
 namespace ResMon.Core.Config;
 
-/// <summary>Position, Deckkraft und Klick-Durchlässigkeit des Overlays.</summary>
+/// <summary>Position, Deckkraft, Größe und Klick-Durchlässigkeit des Overlays.</summary>
 public sealed class OverlaySettings
 {
     public double X { get; set; } = 40;
     public double Y { get; set; } = 40;
+
+    /// <summary>
+    /// Deckkraft des Kartenhintergrunds. Schrift und Kurven bleiben davon
+    /// unberührt — ein halb durchsichtiger Text wäre auf unruhigem Untergrund
+    /// nicht mehr lesbar.
+    /// </summary>
     public double Opacity { get; set; } = 0.9;
+
+    /// <summary>Vergrößerungsfaktor für Fenster und Inhalt zugleich.</summary>
+    public double Scale { get; set; } = 1.0;
+
     public bool ClickThrough { get; set; }
+}
+
+/// <summary>Welche Reihen das Verlaufsdiagramm im Detailfenster zeichnet.</summary>
+public sealed class ChartSettings
+{
+    public bool Cpu { get; set; } = true;
+    public bool Gpu { get; set; } = true;
+    public bool Ram { get; set; } = true;
+    public bool Net { get; set; }
+    public bool Disk { get; set; }
 }
 
 /// <summary>Sampling-Takte in Millisekunden (DESIGN.md §9).</summary>
@@ -49,6 +70,11 @@ public sealed class AppSettings
     public OverlaySettings Overlay { get; set; } = new();
     public IntervalSettings Intervals { get; set; } = new();
     public VisibilitySettings Visible { get; set; } = new();
+    public ChartSettings Chart { get; set; } = new();
+
+    /// <summary>Farbschema beider Fenster: dark, light, blue, red, green oder sepia.</summary>
+    public string Theme { get; set; } = "dark";
+
     public bool Autostart { get; set; }
 
     [JsonIgnore]
@@ -72,6 +98,8 @@ public sealed class AppSettings
         {
             // Beschädigte Datei darf den Start nicht verhindern — mit Standardwerten
             // weiterlaufen und beim nächsten Speichern überschreiben.
+            DiagnosticLog.Report("Einstellungen", ex,
+                $"»{path}« konnte nicht gelesen werden, es gelten die Standardwerte");
             return new AppSettings();
         }
     }
@@ -89,6 +117,8 @@ public sealed class AppSettings
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            DiagnosticLog.Report("Einstellungen", ex,
+                $"»{path}« konnte nicht geschrieben werden, Änderungen überleben den Neustart nicht");
         }
     }
 }

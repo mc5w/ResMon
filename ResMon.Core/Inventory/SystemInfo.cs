@@ -1,7 +1,10 @@
 namespace ResMon.Core.Inventory;
 
-/// <summary>Ein Schlüssel-Wert-Paar für die Systemübersicht.</summary>
-public readonly record struct InfoItem(string Label, string Value);
+/// <summary>
+/// Ein Schlüssel-Wert-Paar für die Systemübersicht. <paramref name="Help"/> wird
+/// als Tooltip angezeigt, wenn der Wert ohne Erklärung in die Irre führen kann.
+/// </summary>
+public readonly record struct InfoItem(string Label, string Value, string? Help = null);
 
 /// <summary>Eine benannte Gruppe von Angaben, etwa "Betriebssystem" oder "Prozessor".</summary>
 public sealed record InfoGroup(string Title, IReadOnlyList<InfoItem> Items);
@@ -27,9 +30,32 @@ public sealed record PhysicalDriveInfo(
     long SizeBytes,
     IReadOnlyList<VolumeInfo> Volumes);
 
+/// <summary>Wie es um ein Gerät steht — bestimmt den Farbpunkt in der Übersicht.</summary>
+public enum DeviceHealth
+{
+    /// <summary>Vorhanden und in Betrieb.</summary>
+    Active,
+
+    /// <summary>Vorhanden, aber gerade ohne Verbindung oder abgeschaltet.</summary>
+    Idle,
+
+    /// <summary>Windows meldet ein Problem mit dem Gerät.</summary>
+    Problem,
+}
+
+/// <summary>Ein Gerät oder eine Verbindung in der Geräteübersicht.</summary>
+public sealed record DeviceEntry(
+    string Name,
+    IReadOnlyList<InfoItem> Details,
+    string Status,
+    DeviceHealth Health);
+
+/// <summary>Eine Kategorie der Geräteübersicht, etwa „Netzwerk" oder „USB-Geräte".</summary>
+public sealed record DeviceGroup(string Title, string? Hint, IReadOnlyList<DeviceEntry> Items);
+
 /// <summary>
-/// Statische Angaben über den Rechner. Wird einmalig erhoben — außer den freien
-/// Laufwerkskapazitäten ändert sich davon zur Laufzeit nichts.
+/// Statische Angaben über den Rechner. Wird einmalig erhoben und auf Wunsch
+/// erneuert — Geräte kommen und gehen, der Rest ändert sich zur Laufzeit nicht.
 /// </summary>
 public sealed record SystemInfo(
     IReadOnlyList<InfoGroup> Groups,
@@ -37,4 +63,10 @@ public sealed record SystemInfo(
     DateTime BootTime)
 {
     public static readonly SystemInfo Empty = new([], [], DateTime.MinValue);
+
+    /// <summary>Netzwerk, Funk und angeschlossene Geräte.</summary>
+    public IReadOnlyList<DeviceGroup> Devices { get; init; } = [];
+
+    /// <summary>Zeitpunkt der Erhebung, damit die Oberfläche sagen kann, wie frisch sie ist.</summary>
+    public DateTime CollectedAt { get; init; } = DateTime.Now;
 }

@@ -1,4 +1,5 @@
 using System.Management;
+using ResMon.Core.Diagnostics;
 
 namespace ResMon.Core.Processes;
 
@@ -10,6 +11,9 @@ namespace ResMon.Core.Processes;
 public sealed class ServiceResolver
 {
     private const string Query = "SELECT Name, DisplayName, ProcessId FROM Win32_Service WHERE State = 'Running'";
+
+    /// <summary>Name im Reiter „Logs".</summary>
+    private const string Source = "Dienstauflösung (WMI)";
 
     private readonly Lock _gate = new();
     private IReadOnlyDictionary<int, IReadOnlyList<string>> _cache =
@@ -65,14 +69,14 @@ public sealed class ServiceResolver
 
             lock (_gate)
                 _cache = snapshot;
+
+            DiagnosticLog.Clear(Source);
         }
-        catch (ManagementException)
+        catch (Exception ex) when (ex is ManagementException or UnauthorizedAccessException)
         {
             // WMI kann kurzzeitig nicht verfügbar sein. Alten Cache behalten,
             // statt die Dienstspalte leerzuräumen.
-        }
-        catch (UnauthorizedAccessException)
-        {
+            DiagnosticLog.Report(Source, ex, "Win32_Service konnte nicht abgefragt werden");
         }
     }
 }

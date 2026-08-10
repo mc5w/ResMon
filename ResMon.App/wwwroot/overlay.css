@@ -1,13 +1,85 @@
-/* Das Fenster selbst ist transparent; nur die Karte zeichnet einen Hintergrund. */
+/* Das Fenster selbst ist transparent; nur die Karte zeichnet einen Hintergrund.
+   Die Deckkraft wirkt allein auf diesen Hintergrund (--card-alpha, vom Host
+   gesetzt) — Schrift und Kurven bleiben voll deckend, sonst wären sie auf
+   unruhigem Untergrund nicht mehr zu lesen. */
 :root {
-    --bg: rgba(16, 18, 24, 0.82);
+    color-scheme: dark;
+    /* Farbneutrales Grau — jeder Farbstich gehört einem eigenen Schema. */
+    --card-rgb: 17 18 20;
+    --card-alpha: 0.9;
     --border: rgba(255, 255, 255, 0.10);
-    --text: #e6e9ef;
-    --muted: #8b93a7;
+    --text: #e8e9ec;
+    --muted: #93969f;
     --track: rgba(255, 255, 255, 0.09);
+    --hover: rgba(255, 255, 255, 0.08);
     --cpu: #60a5fa;
     --gpu: #4ade80;
     --ram: #fb923c;
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
+    --card-rgb: 246 247 250;
+    --border: rgba(0, 0, 0, 0.12);
+    --text: #171b23;
+    --muted: #5c6579;
+    --track: rgba(0, 0, 0, 0.10);
+    --hover: rgba(0, 0, 0, 0.06);
+    --cpu: #2563eb;
+    --gpu: #15803d;
+    --ram: #c2410c;
+}
+
+:root[data-theme="blue"] {
+    color-scheme: dark;
+    --card-rgb: 6 24 46;
+    --border: rgba(56, 189, 248, 0.30);
+    --text: #dceeff;
+    --muted: #86aeda;
+    --track: rgba(56, 189, 248, 0.18);
+    --hover: rgba(56, 189, 248, 0.16);
+    --cpu: #38bdf8;
+    --gpu: #5eead4;
+    --ram: #a5b4fc;
+}
+
+:root[data-theme="red"] {
+    color-scheme: dark;
+    --card-rgb: 25 16 18;
+    --border: rgba(248, 113, 113, 0.22);
+    --text: #f6e7e7;
+    --muted: #b58c8c;
+    --track: rgba(248, 113, 113, 0.14);
+    --hover: rgba(248, 113, 113, 0.12);
+    --cpu: #f87171;
+    --gpu: #fbbf24;
+    --ram: #fb923c;
+}
+
+:root[data-theme="green"] {
+    color-scheme: dark;
+    --card-rgb: 11 23 18;
+    --border: rgba(52, 211, 153, 0.24);
+    --text: #e3f3e9;
+    --muted: #8aae9b;
+    --track: rgba(52, 211, 153, 0.15);
+    --hover: rgba(52, 211, 153, 0.13);
+    --cpu: #34d399;
+    --gpu: #a3e635;
+    --ram: #fbbf24;
+}
+
+:root[data-theme="sepia"] {
+    color-scheme: light;
+    --card-rgb: 244 237 225;
+    --border: rgba(120, 90, 40, 0.26);
+    --text: #2c2417;
+    --muted: #6b5d48;
+    --track: rgba(120, 90, 40, 0.16);
+    --hover: rgba(120, 90, 40, 0.10);
+    --cpu: #1d4e89;
+    --gpu: #2f6b3a;
+    --ram: #a85b0b;
 }
 
 * {
@@ -16,8 +88,9 @@
     padding: 0;
 }
 
+/* Bewusst keine feste Höhe: die Seite wächst mit den eingeblendeten Zeilen und
+   meldet ihre Höhe dem Host, der das Fenster darauf zuschneidet. */
 html, body {
-    height: 100%;
     background: transparent;
     overflow: hidden;
     /* Textauswahl und Kontextgesten stören bei einem Overlay nur. */
@@ -32,10 +105,9 @@ body {
 }
 
 .card {
-    height: 100%;
     display: flex;
     flex-direction: column;
-    background: var(--bg);
+    background: rgb(var(--card-rgb) / var(--card-alpha));
     border: 1px solid var(--border);
     border-radius: 10px;
     backdrop-filter: blur(12px);
@@ -50,6 +122,27 @@ header {
     padding: 5px 6px 5px 10px;
     border-bottom: 1px solid var(--border);
     cursor: move;
+}
+
+/* Notausstieg aus der Klick-Durchlässigkeit: solange Strg+Umschalt gehalten
+   wird, nimmt das Overlay wieder Klicks an — und sagt das auch. */
+:root[data-bypass="1"] .card {
+    outline: 2px solid var(--cpu);
+    outline-offset: -1px;
+}
+
+:root[data-bypass="1"] .brand::after {
+    content: " · klickbar";
+    color: var(--cpu);
+}
+
+/* Das Symbol sitzt in der Kopfzeile und ist zugleich Anfasser zum Verschieben —
+   deshalb keine eigene Maus-Behandlung. */
+.mark {
+    flex: none;
+    width: 27px;
+    height: 15px;
+    display: block;
 }
 
 .brand {
@@ -76,7 +169,7 @@ button {
 
 button:hover {
     color: var(--text);
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--hover);
 }
 
 #btn-close {
@@ -91,12 +184,15 @@ button:hover {
 }
 
 .rows {
-    flex: 1;
     display: flex;
     flex-direction: column;
-    justify-content: center;
     gap: 7px;
     padding: 8px 10px;
+}
+
+/* Ohne eingeblendete Zeile bliebe sonst die Polsterung als leerer Streifen stehen. */
+.rows:not(:has(.row:not([hidden]))) {
+    display: none;
 }
 
 .row {
@@ -214,4 +310,56 @@ footer {
 #btn-detail {
     font-size: 11px;
     border-color: var(--border);
+}
+
+/* ---------- Hinweis auf die Klick-Durchlässigkeit ----------
+
+   Die Leiste steht nur da, wenn das Overlay keine Klicks annimmt. Sie ist die
+   einzige Stelle, an der die Tastenkombination sichtbar ist: das Tray-Menü ist
+   eingeklappt, und die Einstellungsseite erreicht man nur über eine
+   Schaltfläche, die dann selbst nicht klickbar ist. */
+.passthrough {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border-top: 1px solid var(--border);
+    font-size: 10px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+}
+
+:root[data-clickthrough="1"] .passthrough {
+    display: flex;
+}
+
+.chord {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--text);
+}
+
+.chord b {
+    font-weight: 600;
+    font-size: 10px;
+    line-height: 1;
+    padding: 3px 5px;
+    border: 1px solid var(--border);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: var(--hover);
+}
+
+/* Wird die Kombination gehalten, ist der Hinweis erfüllt — dann zeigt die
+   Leiste den Erfolg an, statt weiter zu erklären. */
+:root[data-bypass="1"] .passthrough {
+    color: var(--cpu);
+}
+
+:root[data-bypass="1"] .chord b {
+    color: var(--cpu);
+    border-color: var(--cpu);
 }

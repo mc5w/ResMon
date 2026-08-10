@@ -14,6 +14,7 @@
             <h2>CPU</h2>
             <p class="big"><span id="cpu-percent">–</span><span class="unit">%</span></p>
             <p class="sub" id="cpu-sub">–</p>
+            <p class="sub" id="cpu-threads" title="Prozesse und Threads insgesamt, aus dem Prozessbaum des Systems. Gezählt werden alle laufenden Prozesse — auch die, für die Windows keine Leistungszähler herausgibt und die deshalb in der Tabelle fehlen.">–</p>
             <div class="cores" id="cpu-cores"></div>
         </article>
 
@@ -45,8 +46,30 @@
     </section>
 
     <nav class="tabs">
+        <!-- Dieselbe Form wie das Anwendungssymbol; die Punktliste steht in
+             tools\make-icon.ps1. Der Ausschnitt ist auf den Linienzug samt
+             Strichstärke zugeschnitten, damit die Marke ihren Platz ausfüllt und
+             nicht als Briefmarke in einem Quadrat sitzt. -->
+        <svg class="mark" viewBox="-3 11 70 39" role="img" aria-label="ResMon">
+            <title>ResMon</title>
+            <defs>
+                <linearGradient id="mark-gradient" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stop-color="#60a5fa"/>
+                    <stop offset="50%" stop-color="#4ade80"/>
+                    <stop offset="100%" stop-color="#fb923c"/>
+                </linearGradient>
+            </defs>
+            <path d="M0 46H9V15L20 20L9 26L19 46H33L36 33L27 31L30 17H39L44 46H47V15L53 30L59 15V46H64"
+                  fill="none" stroke="url(#mark-gradient)" stroke-width="5"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+
         <button type="button" class="tab active" data-view="processes">Prozesse</button>
+        <button type="button" class="tab" data-view="energy">Energie</button>
+        <button type="button" class="tab" data-view="connections">Verbindungen</button>
         <button type="button" class="tab" data-view="system">System</button>
+        <button type="button" class="tab" data-view="logs">Logs</button>
+        <button type="button" class="tab" data-view="settings">Einstellungen</button>
     </nav>
 
     <!-- Ansicht: Prozesse -->
@@ -54,18 +77,15 @@
         <section class="chart-panel">
             <div class="chart-header">
                 <span>Verlauf, letzte 5 Minuten</span>
-                <span class="legend">
-                    <i data-metric="cpu"></i>CPU
-                    <i data-metric="gpu"></i>GPU
-                    <i data-metric="ram"></i>RAM
-                </span>
+                <!-- Inhalt richtet sich nach der Auswahl unter Einstellungen. -->
+                <span class="legend" id="chart-legend"></span>
             </div>
             <canvas id="history"></canvas>
         </section>
 
         <section class="controls">
-            <input id="filter" type="search" placeholder="Prozessname, Dienst, Pfad oder Notiz filtern …" autocomplete="off" spellcheck="false">
-            <label><input id="aggregate" type="checkbox" checked> Prozessbäume zusammenfassen</label>
+            <input id="filter" type="search" placeholder="Prozessname, Dienst, Benutzer, Pfad oder Notiz filtern …" autocomplete="off" spellcheck="false">
+            <label title="Fasst gleichnamige Kindprozesse unter ihrem Elternprozess zusammen — die Dutzend Renderer eines Browsers werden zu einer Zeile. Prozesse, die ein Programm unter anderem Namen startet, bleiben eigenständig."><input id="aggregate" type="checkbox" checked> Gleichnamige zusammenfassen</label>
             <label><input id="only-active" type="checkbox" checked> Nur aktive</label>
 
             <div class="menu">
@@ -88,14 +108,186 @@
 
     <div id="row-menu" class="context-menu" hidden></div>
 
+    <!-- Ansicht: Energie -->
+    <div id="view-energy" class="view" hidden>
+      <div class="energy-scroll">
+        <section class="tiles">
+            <article class="tile" data-metric="power">
+                <h2>Gemessen</h2>
+                <p class="big"><span id="energy-total">–</span><span class="unit">W</span></p>
+                <p class="sub" id="energy-total-sub">–</p>
+            </article>
+
+            <article class="tile" data-metric="cpu">
+                <h2>Prozessor</h2>
+                <p class="big"><span id="energy-cpu">–</span><span class="unit">W</span></p>
+                <p class="sub" id="energy-cpu-sub">–</p>
+            </article>
+
+            <article class="tile" data-metric="gpu">
+                <h2>Grafikkarte</h2>
+                <p class="big"><span id="energy-gpu">–</span><span class="unit">W</span></p>
+                <p class="sub" id="energy-gpu-sub">–</p>
+            </article>
+
+            <article class="tile" data-metric="battery" id="battery-tile" hidden>
+                <h2>Akku</h2>
+                <p class="big"><span id="battery-percent">–</span><span class="unit">%</span></p>
+                <p class="sub" id="battery-sub">–</p>
+                <div class="battery-bar"><i id="battery-fill"></i></div>
+            </article>
+        </section>
+
+        <section class="chart-panel">
+            <div class="chart-header">
+                <span>Leistungsaufnahme, letzte 5 Minuten</span>
+                <span class="legend" id="energy-legend"></span>
+            </div>
+            <canvas id="energy-history"></canvas>
+        </section>
+
+        <div class="energy-columns">
+            <section class="info-card">
+                <h4>Temperaturen</h4>
+                <div id="temp-list" class="temp-list"></div>
+                <p class="field-hint" id="temp-empty">Es werden keine Temperatursensoren gemeldet. Prozessor- und Sockeltemperatur brauchen den Sensor-Treiber; Grafikkarten melden ihre Werte auch ohne ihn.</p>
+            </section>
+
+            <section class="info-card">
+                <h4>Lüfter</h4>
+                <div id="fan-list" class="fan-list"></div>
+                <p class="field-hint" id="fan-empty">Es werden keine Lüfter gemeldet. Gehäuselüfter hängen am Super-I/O-Chip des Mainboards — ist dessen Treiber blockiert, bleibt die Liste leer. Notebooks geben ihre Drehzahlen oft überhaupt nicht über die Sensorschnittstelle heraus, sondern nur an die Steuerungssoftware des Herstellers.</p>
+            </section>
+
+            <section class="info-card">
+                <h4>Leistungssensoren</h4>
+                <dl id="rail-list"></dl>
+                <p class="field-hint" id="rail-empty">Es werden keine Leistungssensoren gemeldet.</p>
+            </section>
+
+            <section class="info-card" id="battery-card" hidden>
+                <h4>Akku im Einzelnen</h4>
+                <dl id="battery-details"></dl>
+            </section>
+        </div>
+
+        <section class="info-card">
+            <h4>Energieverbrauch je Prozess</h4>
+            <p class="field-hint">Der Einfluss verrechnet CPU-, GPU-, Datenträger- und Netzlast zu einer Zahl — dieselben Zutaten, aus denen auch der Task-Manager seine Einstufung bildet. Die Wattangabe verteilt die <b>gemessene</b> Leistungsaufnahme von Prozessor und Grafikkarte nach dem Lastanteil des Prozesses: eine Schätzung, keine Messung am einzelnen Prozess. Prozessbäume sind hier immer zusammengefasst.</p>
+            <div class="energy-table-wrap">
+                <table id="energy-processes">
+                    <thead>
+                        <tr id="energy-head"></tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Ansicht: Verbindungen -->
+    <div id="view-connections" class="view" hidden>
+        <section class="ports-panel">
+            <div class="chart-header">
+                <span>Offene Ports — worauf dieser Rechner Verbindungen annimmt</span>
+                <span class="legend" id="ports-summary"></span>
+            </div>
+            <div id="ports-list" class="ports-list"></div>
+            <p class="field-hint" id="ports-empty">Es lauscht gerade nichts.</p>
+        </section>
+
+        <section class="controls">
+            <input id="conn-filter" type="search" placeholder="Adresse, Port, Zustand oder Prozess filtern …" autocomplete="off" spellcheck="false">
+            <label title="Wartende TCP-Sockets im Zustand „Abhören“. Sie übertragen nichts, sondern nehmen Verbindungen entgegen."><input id="conn-listening" type="checkbox" checked> Lauschende Ports</label>
+            <label title="UDP kennt keine Verbindung. Jeder Eintrag ist ein gebundener Port, über den gesendet und empfangen werden kann."><input id="conn-udp" type="checkbox" checked> UDP</label>
+            <label title="Verbindungen zum eigenen Rechner (127.0.0.1 und ::1). Sie verlassen die Netzwerkkarte nie — meist reden zwei Programme desselben Herstellers miteinander."><input id="conn-loopback" type="checkbox" checked> Loopback</label>
+            <span class="status" id="conn-status">–</span>
+        </section>
+
+        <div class="table-wrap">
+            <table id="connections">
+                <thead>
+                    <tr id="conn-head"></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
     <!-- Ansicht: System -->
     <div id="view-system" class="view" hidden>
         <div class="system-wrap">
             <p id="system-empty" class="system-empty">Systemübersicht wird erhoben …</p>
             <div id="system-groups" class="system-groups"></div>
-            <h3 class="system-heading">Datenträger und Laufwerke</h3>
+
+            <h3 class="system-heading">
+                <span>Konnektivität und angeschlossene Geräte</span>
+                <button id="refresh-devices" type="button" class="toggle"
+                        title="Erhebt die Übersicht neu. Geräte kommen und gehen — ein eingestecktes USB-Gerät oder eine neue Netzwerkverbindung erscheint erst danach.">Aktualisieren</button>
+            </h3>
+            <div id="system-devices" class="system-groups"></div>
+
+            <h3 class="system-heading"><span>Datenträger und Laufwerke</span></h3>
             <div id="system-drives" class="system-drives"></div>
         </div>
+    </div>
+
+    <!-- Ansicht: Logs -->
+    <div id="view-logs" class="view" hidden>
+        <section class="controls">
+            <span id="log-summary" class="log-summary">–</span>
+            <label title="Zeigt zusätzlich alle Quellen, die einwandfrei gelesen werden — als Gegenprobe zu dem, was fehlt."><input id="log-all" type="checkbox"> Auch das Funktionierende zeigen</label>
+            <span class="status" id="log-status">–</span>
+        </section>
+
+        <div class="log-scroll">
+            <div id="log-list" class="log-list"></div>
+        </div>
+    </div>
+
+    <!-- Ansicht: Einstellungen -->
+    <div id="view-settings" class="view" hidden>
+      <div class="settings-scroll">
+        <div class="settings-wrap">
+            <section class="info-card">
+                <h4>Farbschema</h4>
+                <p class="field-hint">Gilt für beide Fenster, einschließlich Titelleiste und Rahmen.</p>
+                <div class="theme-picker" id="theme-picker"></div>
+            </section>
+
+            <section class="info-card">
+                <h4>Kleine Ansicht</h4>
+
+                <label class="field">
+                    <span>Deckkraft <b id="opacity-value">–</b></span>
+                    <input id="set-opacity" type="range" min="20" max="100" step="5">
+                </label>
+                <p class="field-hint">Wirkt auf den Hintergrund der Karte. Schrift und Kurven bleiben deckend, damit sie auf jedem Untergrund lesbar bleiben.</p>
+
+                <label class="field">
+                    <span>Größe <b id="scale-value">–</b></span>
+                    <input id="set-scale" type="range" min="80" max="250" step="5">
+                </label>
+                <p class="field-hint">Vergrößert Fenster und Inhalt gemeinsam. Am Overlay geht es auch mit Strg&nbsp;+&nbsp;Mausrad, ohne Strg regelt das Mausrad die Deckkraft.</p>
+
+                <h5>Angezeigte Zeilen</h5>
+                <div class="check-grid" id="overlay-rows"></div>
+                <p class="field-hint">Das Fenster ist immer genau so hoch wie die eingeschalteten Zeilen — die kleinstmögliche Größe ergibt sich also aus dieser Auswahl.</p>
+
+                <label class="check">
+                    <input type="checkbox" id="set-clickthrough">
+                    <span>Klick-durchlässig <em>Mausklicks gehen durch das Overlay hindurch an das Fenster darunter. Zum Verschieben und Bedienen <b>Strg&nbsp;+&nbsp;Umschalt</b> gedrückt halten — das Overlay bekommt dann einen farbigen Rahmen und nimmt wieder Klicks an. Ausschalten geht auch über das Tray-Menü.</em></span>
+                </label>
+            </section>
+
+            <section class="info-card">
+                <h4>Verlaufsdiagramm</h4>
+                <div class="check-grid" id="chart-rows"></div>
+                <p class="field-hint">Prozentwerte teilen sich die Achse von 0 bis 100 %. Netzwerk und Datenträger haben keine Obergrenze und werden als Fläche hinter den Linien gezeichnet, skaliert auf ihren höchsten Wert der letzten fünf Minuten; der steht in der Legende.</p>
+            </section>
+        </div>
+      </div>
     </div>
 
     <script src="detail.js"></script>

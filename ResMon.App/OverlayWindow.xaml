@@ -20,7 +20,11 @@
          WPF-Fläche darunter hätte damit überall Alpha 0 — Windows verwirft
          Mausklicks auf vollständig transparenten Pixeln, das Overlay wäre
          sichtbar, aber weder zieh- noch klickbar. Alpha 1/255 ist optisch nicht
-         wahrnehmbar und stellt das Hit-Testing wieder her. -->
+         wahrnehmbar und stellt das Hit-Testing wieder her.
+
+         Aus demselben Grund darf Window.Opacity nicht gesetzt werden: sie
+         multipliziert dieses Alpha und drückt es unter 0.5 wieder auf 0. Die
+         Deckkraft der Anzeige regelt die Seite selbst (OverlayWindow.ApplyOpacity). -->
     <Grid>
         <wv2:WebView2 x:Name="Web" />
     </Grid>

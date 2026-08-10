@@ -17,6 +17,9 @@
     <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.2.5" />
     <!-- Version an die transitive Anforderung von LibreHardwareMonitorLib angeglichen. -->
     <PackageReference Include="System.Management" Version="10.0.2" />
+    <!-- Ereignisprotokoll: Startart des Rechners und gemeldete Anwendungsfehler.
+         Die Klassen liegen nicht im Basisframework von .NET. -->
+    <PackageReference Include="System.Diagnostics.EventLog" Version="9.0.1" />
   </ItemGroup>
 
 </Project>

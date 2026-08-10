@@ -44,8 +44,9 @@ public sealed class ProcessSampler : IDisposable
 
     private readonly PdhQuery _query = new();
     private readonly ServiceResolver _services;
+    private readonly AppErrorLog? _faults;
     private readonly int _processorCount = Environment.ProcessorCount;
-    private readonly DescriptionCache _descriptions = new();
+    private readonly ProcessInfoCache _info = new();
 
     private readonly PdhCounter? _cpu;
     private readonly PdhCounter? _pid;
@@ -54,9 +55,10 @@ public sealed class ProcessSampler : IDisposable
     private readonly PdhCounter? _ioRead;
     private readonly PdhCounter? _ioWrite;
 
-    public ProcessSampler(ServiceResolver services)
+    public ProcessSampler(ServiceResolver services, AppErrorLog? faults = null)
     {
         _services = services;
+        _faults = faults;
 
         _cpu = _query.TryAddCounter(CpuPath);
         if (_cpu is not null)
@@ -98,6 +100,15 @@ public sealed class ProcessSampler : IDisposable
     public IReadOnlySet<int> LivePids { get; private set; } = new HashSet<int>();
 
     /// <summary>
+    /// Prozesse und Threads des letzten Toolhelp-Snapshots. Sie zählen alle
+    /// laufenden Prozesse, nicht nur die mit lesbaren Zählern — die Summe über die
+    /// Tabellenzeilen fiele deshalb kleiner aus.
+    /// </summary>
+    public int ProcessCount { get; private set; }
+
+    public int ThreadCount { get; private set; }
+
+    /// <summary>
     /// Verwirft das Aufwärm-Sample. Nach einer Pause (Detailfenster geschlossen)
     /// wären die CPU-Deltas sonst über die gesamte Pause gemittelt.
     /// </summary>
@@ -109,9 +120,31 @@ public sealed class ProcessSampler : IDisposable
     /// </summary>
     public IReadOnlyList<ProcessSample> Sample(
         IReadOnlyDictionary<int, GpuProcessUsage> gpuByPid,
-        IReadOnlyDictionary<int, NetworkUsage> networkByPid)
+        IReadOnlyDictionary<int, NetworkUsage> networkByPid,
+        IReadOnlyDictionary<int, ProcessPorts> portsByPid)
     {
-        if (!Available || !_query.Collect())
+        if (!Available)
+            return [];
+
+        // Der Prozessbaum steht vor der Zählerabfrage: er liefert die Summen für
+        // Prozesse und Threads, und die sollen auch beim verworfenen Aufwärm-Sample
+        // schon stimmen.
+        Dictionary<int, ProcessTreeEntry> tree = Toolhelp.Snapshot();
+        LivePids = tree.Keys.ToHashSet();
+        ProcessCount = tree.Count;
+
+        int threads = 0;
+        foreach (ProcessTreeEntry process in tree.Values)
+            threads += process.ThreadCount;
+        ThreadCount = threads;
+
+        // Fenster ändern sich, während der Prozess lebt — anders als Konto und
+        // Pfad lässt sich das nicht einmalig ermitteln und wegcachen.
+        Dictionary<int, WindowOwners.WindowState> windows = WindowOwners.Snapshot();
+
+        _info.Prune(LivePids);
+
+        if (!_query.Collect())
             return [];
 
         // Instanzname -> PID. Process V2 vergibt eindeutige Instanzen pro Prozess
@@ -131,9 +164,6 @@ public sealed class ProcessSampler : IDisposable
         var privateBytes = ReadByInstance(_privateBytes);
         var ioRead = ReadRateByInstance(_ioRead);
         var ioWrite = ReadRateByInstance(_ioWrite);
-        Dictionary<int, ProcessTreeEntry> tree = Toolhelp.Snapshot();
-        LivePids = tree.Keys.ToHashSet();
-        _descriptions.Prune(LivePids);
 
         var samples = new List<ProcessSample>(pidByInstance.Count);
         foreach (PdhInstanceValue cpu in _cpu!.ReadArrayDouble(noCap100: true))
@@ -148,15 +178,18 @@ public sealed class ProcessSampler : IDisposable
             string name = ResolveName(cpu.Instance, pid, tree);
             GpuProcessUsage? gpu = gpuByPid.TryGetValue(pid, out GpuProcessUsage? usage) ? usage : null;
             NetworkUsage network = networkByPid.GetValueOrDefault(pid);
-            int? parentPid = tree.TryGetValue(pid, out ProcessTreeEntry entry) && entry.ParentPid != 0
-                ? entry.ParentPid
-                : null;
+            ProcessPorts ports = portsByPid.GetValueOrDefault(pid, ProcessPorts.Empty);
+            bool known = tree.TryGetValue(pid, out ProcessTreeEntry entry);
+            int? parentPid = known && entry.ParentPid != 0 ? entry.ParentPid : null;
+
+            ProcessOwner owner = _info.GetOwner(pid);
+            bool hasWindow = windows.TryGetValue(pid, out WindowOwners.WindowState window);
 
             samples.Add(new ProcessSample(
                 pid,
                 parentPid,
                 name,
-                _descriptions.Get(pid),
+                _info.GetDescription(pid),
                 cpuPercent,
                 workingSet.GetValueOrDefault(cpu.Instance),
                 privateBytes.GetValueOrDefault(cpu.Instance),
@@ -168,11 +201,35 @@ public sealed class ProcessSampler : IDisposable
                 network.SentBytesPerSec,
                 ioRead.GetValueOrDefault(cpu.Instance),
                 ioWrite.GetValueOrDefault(cpu.Instance),
-                _descriptions.GetPath(pid)));
+                _info.GetPath(pid),
+                known ? entry.ThreadCount : 0)
+            {
+                UserName = owner.Account,
+                Category = Categorize(owner.Kind, hasWindow),
+                WindowTitle = hasWindow ? window.Title : null,
+                NotResponding = hasWindow && window.Hung,
+                FaultNote = _faults?.ForName(name)?.Summary,
+                ListeningTcpPorts = ports.ListeningTcp,
+                ListeningUdpPorts = ports.ListeningUdp,
+                ConnectionCount = ports.EstablishedCount,
+            });
         }
 
         return samples;
     }
+
+    /// <summary>
+    /// Die Einteilung des Task-Managers: Systemkonten sind Windows-Prozesse, ein
+    /// eigenes Fenster macht eine App daraus, alles Übrige läuft im Hintergrund.
+    /// Ein Prozess, dessen Token sich nicht öffnen lässt, ist geschützt und
+    /// gehört damit ebenfalls zu Windows.
+    /// </summary>
+    private static ProcessCategory Categorize(AccountKind kind, bool hasWindow) => kind switch
+    {
+        AccountKind.User when hasWindow => ProcessCategory.App,
+        AccountKind.User => ProcessCategory.Background,
+        _ => ProcessCategory.Windows,
+    };
 
     /// <summary>Wie <see cref="ReadByInstance"/>, aber für ratenbasierte Zähler.</summary>
     private static Dictionary<string, double> ReadRateByInstance(PdhCounter? counter)
@@ -218,27 +275,48 @@ public sealed class ProcessSampler : IDisposable
     public void Dispose() => _query.Dispose();
 
     /// <summary>
-    /// Dateibeschreibungen sind teuer zu ermitteln (Handle öffnen, Versionsressource
-    /// lesen) und ändern sich nie — deshalb pro PID einmalig ermitteln und halten.
+    /// Pfad, Dateibeschreibung und Konto sind teuer zu ermitteln (Handle öffnen,
+    /// Versionsressource lesen, SID auflösen) und ändern sich zu Lebzeiten eines
+    /// Prozesses nicht — deshalb pro PID einmalig ermitteln und halten.
     /// </summary>
-    private sealed class DescriptionCache
+    private sealed class ProcessInfoCache
     {
         private readonly Dictionary<int, Entry> _byPid = [];
         private readonly Dictionary<string, string?> _descriptionByPath = new(StringComparer.OrdinalIgnoreCase);
 
-        private readonly record struct Entry(string? Path, string? Description);
+        private readonly record struct Entry(string? Path, string? Description, ProcessOwner Owner);
 
-        public string? Get(int pid) => Resolve(pid).Description;
+        public string? GetDescription(int pid) => Resolve(pid).Description;
 
         public string? GetPath(int pid) => Resolve(pid).Path;
+
+        public ProcessOwner GetOwner(int pid) => Resolve(pid).Owner;
 
         private Entry Resolve(int pid)
         {
             if (_byPid.TryGetValue(pid, out Entry cached))
                 return cached;
 
+            // Ein Handle für beides: Pfad und Token hängen am selben Prozess, und
+            // OpenProcess ist der teure Teil.
+            IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            string? path = null;
+            ProcessOwner owner = ProcessOwner.Unknown;
+            try
+            {
+                if (handle != IntPtr.Zero)
+                {
+                    path = TryGetImagePath(handle);
+                    owner = ProcessIdentity.Read(handle);
+                }
+            }
+            finally
+            {
+                if (handle != IntPtr.Zero)
+                    CloseHandle(handle);
+            }
+
             string? description = null;
-            string? path = TryGetImagePath(pid);
             if (path is not null && !_descriptionByPath.TryGetValue(path, out description))
             {
                 try
@@ -253,7 +331,7 @@ public sealed class ProcessSampler : IDisposable
                 _descriptionByPath[path] = description;
             }
 
-            var entry = new Entry(path, description);
+            var entry = new Entry(path, description, owner);
             _byPid[pid] = entry;
             return entry;
         }
@@ -268,22 +346,11 @@ public sealed class ProcessSampler : IDisposable
                 _byPid.Remove(pid);
         }
 
-        private static string? TryGetImagePath(int pid)
+        private static string? TryGetImagePath(IntPtr handle)
         {
-            IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-            if (handle == IntPtr.Zero)
-                return null;
-
-            try
-            {
-                var buffer = new StringBuilder(1024);
-                int size = buffer.Capacity;
-                return QueryFullProcessImageNameW(handle, 0, buffer, ref size) ? buffer.ToString() : null;
-            }
-            finally
-            {
-                CloseHandle(handle);
-            }
+            var buffer = new StringBuilder(1024);
+            int size = buffer.Capacity;
+            return QueryFullProcessImageNameW(handle, 0, buffer, ref size) ? buffer.ToString() : null;
         }
 
         private const int PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;

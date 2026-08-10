@@ -48,6 +48,21 @@ internal static class WindowInterop
         SendMessageW(handle, WM_NCLBUTTONDOWN, new IntPtr(HTCAPTION), IntPtr.Zero);
     }
 
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    private const int VK_SHIFT = 0x10;
+    private const int VK_CONTROL = 0x11;
+
+    /// <summary>
+    /// True, solange Strg und Umschalt zusammen gedrückt sind. Das ist der
+    /// Notausstieg aus der Klick-Durchlässigkeit: ohne ihn wäre ein Overlay, das
+    /// keine Klicks mehr annimmt, nur noch über das Tray-Menü erreichbar.
+    /// </summary>
+    public static bool IsBypassChordDown()
+        => (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0
+           && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
     public static void SetClickThrough(Window window, bool enabled)
     {
         IntPtr handle = new WindowInteropHelper(window).Handle;
@@ -60,6 +75,42 @@ internal static class WindowInterop
             : style & ~WS_EX_TRANSPARENT;
 
         SetWindowLongPtr(handle, GWL_EXSTYLE, new IntPtr(style));
+    }
+
+    private const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    private const int DWMWA_BORDER_COLOR = 34;
+    private const int DWMWA_CAPTION_COLOR = 35;
+    private const int DWMWA_TEXT_COLOR = 36;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hWnd, int attribute, ref int value, int size);
+
+    /// <summary>
+    /// Färbt Titelleiste und Rahmen passend zum Schema. Ohne das behält Windows
+    /// seine eigene helle Umrandung, die neben einem dunklen Fensterinhalt als
+    /// heller Rand stehen bleibt. Die Attribute gibt es seit Windows 11 21H2;
+    /// auf älteren Systemen liefert DWM einen Fehlercode, den wir ignorieren —
+    /// dann bleibt es beim Standardrahmen.
+    /// </summary>
+    public static void ApplyWindowChrome(Window window, WindowTheme theme)
+    {
+        IntPtr handle = new WindowInteropHelper(window).Handle;
+        if (handle == IntPtr.Zero)
+            return;
+
+        int dark = theme.DarkChrome ? 1 : 0;
+        DwmSetWindowAttribute(handle, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
+
+        int caption = unchecked((int)theme.BackgroundColorRef);
+        DwmSetWindowAttribute(handle, DWMWA_CAPTION_COLOR, ref caption, sizeof(int));
+
+        int border = unchecked((int)theme.BorderColorRef);
+        DwmSetWindowAttribute(handle, DWMWA_BORDER_COLOR, ref border, sizeof(int));
+
+        // Der Titeltext muss dem Hintergrund folgen, sonst steht schwarze Schrift
+        // auf dunkler Leiste.
+        int text = theme.DarkChrome ? 0x00E9E6E6 : 0x00272119;
+        DwmSetWindowAttribute(handle, DWMWA_TEXT_COLOR, ref text, sizeof(int));
     }
 
     /// <summary>Hält das Overlay aus Alt-Tab und Taskleiste heraus.</summary>

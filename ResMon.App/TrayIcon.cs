@@ -13,14 +13,28 @@ public sealed class TrayIcon : IDisposable
 {
     private readonly AppSettings _settings;
     private readonly NotifyIcon _notifyIcon;
-    private readonly Icon _icon;
+
+    /// <summary>Das geladene Symbol; <c>null</c>, wenn das Systemsymbol einspringt.</summary>
+    private readonly Icon? _icon;
     private readonly ToolStripMenuItem _clickThroughItem;
     private readonly ToolStripMenuItem _autostartItem;
+    private readonly ToolStripMenuItem _opacityRoot;
+    private readonly List<(ToolStripMenuItem Item, Func<bool> IsOn)> _checks = [];
+
+    /// <summary>
+    /// True, solange <see cref="Sync"/> die Haken setzt. Ohne diese Sperre würde
+    /// jedes nachgezogene Häkchen eine Änderungsmeldung auslösen und die gerade
+    /// erst übernommene Einstellung erneut durch alle Fenster schicken.
+    /// </summary>
+    private bool _syncing;
 
     public TrayIcon(AppSettings settings)
     {
         _settings = settings;
-        _icon = CreateIcon();
+
+        // Ohne Symbol bliebe NotifyIcon unsichtbar; dann muss das Systemsymbol
+        // herhalten.
+        _icon = AppIcon.CreateTrayIcon();
 
         _clickThroughItem = new ToolStripMenuItem("Klick-durchlässig")
         {
@@ -29,9 +43,13 @@ public sealed class TrayIcon : IDisposable
         };
         _clickThroughItem.CheckedChanged += (_, _) =>
         {
-            ClickThroughChanged?.Invoke(_clickThroughItem.Checked);
-            settings.Save();
+            if (_syncing)
+                return;
+
+            settings.Overlay.ClickThrough = _clickThroughItem.Checked;
+            SettingsChanged?.Invoke();
         };
+        _checks.Add((_clickThroughItem, () => _settings.Overlay.ClickThrough));
 
         _autostartItem = new ToolStripMenuItem("Mit Windows starten")
         {
@@ -40,10 +58,12 @@ public sealed class TrayIcon : IDisposable
         };
         _autostartItem.Click += (_, _) => ToggleAutostart();
 
+        _opacityRoot = BuildOpacityMenu();
+
         var menu = new ContextMenuStrip();
         menu.Items.Add(new ToolStripMenuItem("Details…", null, (_, _) => DetailRequested?.Invoke()));
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(BuildOpacityMenu());
+        menu.Items.Add(_opacityRoot);
         menu.Items.Add(BuildVisibilityMenu());
         menu.Items.Add(_clickThroughItem);
         menu.Items.Add(_autostartItem);
@@ -52,7 +72,7 @@ public sealed class TrayIcon : IDisposable
 
         _notifyIcon = new NotifyIcon
         {
-            Icon = _icon,
+            Icon = _icon ?? SystemIcons.Application,
             Text = "ResMon",
             Visible = true,
             ContextMenuStrip = menu,
@@ -62,8 +82,30 @@ public sealed class TrayIcon : IDisposable
 
     public event Action? DetailRequested;
     public event Action? ExitRequested;
-    public event Action<double>? OpacityChanged;
-    public event Action<bool>? ClickThroughChanged;
+
+    /// <summary>Eine Einstellung im Menü wurde geändert; sie steht bereits in den Settings.</summary>
+    public event Action? SettingsChanged;
+
+    /// <summary>
+    /// Zieht die Haken auf den aktuellen Einstellungsstand nach — nötig, wenn die
+    /// Änderung von der Einstellungsseite im Detailfenster kam.
+    /// </summary>
+    public void Sync()
+    {
+        _syncing = true;
+        try
+        {
+            foreach ((ToolStripMenuItem item, Func<bool> isOn) in _checks)
+                item.Checked = isOn();
+
+            foreach (ToolStripMenuItem item in _opacityRoot.DropDownItems)
+                item.Checked = Math.Abs(_settings.Overlay.Opacity - (int)item.Tag! / 100.0) < 0.005;
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
 
     /// <summary>Zeigt eine Ballon-Meldung, etwa wenn der Sensor-Treiber fehlt.</summary>
     public void Notify(string title, string message)
@@ -76,14 +118,15 @@ public sealed class TrayIcon : IDisposable
         {
             var item = new ToolStripMenuItem($"{percent} %")
             {
-                Checked = Math.Abs(_settings.Overlay.Opacity - percent / 100.0) < 0.01,
+                Tag = percent,
+                Checked = Math.Abs(_settings.Overlay.Opacity - percent / 100.0) < 0.005,
             };
             item.Click += (_, _) =>
             {
                 foreach (ToolStripMenuItem sibling in root.DropDownItems)
                     sibling.Checked = ReferenceEquals(sibling, item);
-                OpacityChanged?.Invoke(percent / 100.0);
-                _settings.Save();
+                _settings.Overlay.Opacity = percent / 100.0;
+                SettingsChanged?.Invoke();
             };
             root.DropDownItems.Add(item);
         }
@@ -96,24 +139,26 @@ public sealed class TrayIcon : IDisposable
         var root = new ToolStripMenuItem("Anzeige");
         VisibilitySettings visible = _settings.Visible;
 
-        root.DropDownItems.Add(Toggle("CPU", visible.Cpu, v => visible.Cpu = v));
-        root.DropDownItems.Add(Toggle("GPU", visible.Gpu, v => visible.Gpu = v));
-        root.DropDownItems.Add(Toggle("Arbeitsspeicher", visible.Ram, v => visible.Ram = v));
-        root.DropDownItems.Add(Toggle("Netzwerk", visible.Net, v => visible.Net = v));
-        root.DropDownItems.Add(Toggle("Datenträger", visible.Disk, v => visible.Disk = v));
-        root.DropDownItems.Add(Toggle("Temperaturen", visible.Temps, v => visible.Temps = v));
+        root.DropDownItems.Add(Toggle("CPU", () => visible.Cpu, v => visible.Cpu = v));
+        root.DropDownItems.Add(Toggle("GPU", () => visible.Gpu, v => visible.Gpu = v));
+        root.DropDownItems.Add(Toggle("Arbeitsspeicher", () => visible.Ram, v => visible.Ram = v));
+        root.DropDownItems.Add(Toggle("Netzwerk", () => visible.Net, v => visible.Net = v));
+        root.DropDownItems.Add(Toggle("Datenträger", () => visible.Disk, v => visible.Disk = v));
+        root.DropDownItems.Add(Toggle("Temperaturen", () => visible.Temps, v => visible.Temps = v));
         return root;
 
-        ToolStripMenuItem Toggle(string text, bool initial, Action<bool> apply)
+        ToolStripMenuItem Toggle(string text, Func<bool> isOn, Action<bool> apply)
         {
-            var item = new ToolStripMenuItem(text) { CheckOnClick = true, Checked = initial };
+            var item = new ToolStripMenuItem(text) { CheckOnClick = true, Checked = isOn() };
             item.CheckedChanged += (_, _) =>
             {
-                // Das Overlay liest die Sichtbarkeit bei jedem Takt neu — die
-                // Änderung greift also spätestens nach einer Sekunde.
+                if (_syncing)
+                    return;
+
                 apply(item.Checked);
-                _settings.Save();
+                SettingsChanged?.Invoke();
             };
+            _checks.Add((item, isOn));
             return item;
         }
     }
@@ -134,52 +179,13 @@ public sealed class TrayIcon : IDisposable
         _settings.Save();
     }
 
-    /// <summary>
-    /// Zeichnet das Icon zur Laufzeit — drei Balken in aufsteigender Höhe. Spart
-    /// eine Binärressource im Repository.
-    /// </summary>
-    private static Icon CreateIcon()
-    {
-        using var bitmap = new Bitmap(32, 32);
-        using (var graphics = Graphics.FromImage(bitmap))
-        {
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            graphics.Clear(Color.Transparent);
-
-            (int Height, Color Color)[] bars =
-            [
-                (10, Color.FromArgb(255, 96, 165, 250)),
-                (18, Color.FromArgb(255, 74, 222, 128)),
-                (26, Color.FromArgb(255, 251, 146, 60)),
-            ];
-
-            for (int i = 0; i < bars.Length; i++)
-            {
-                using var brush = new SolidBrush(bars[i].Color);
-                graphics.FillRectangle(brush, 4 + i * 9, 29 - bars[i].Height, 7, bars[i].Height);
-            }
-        }
-
-        IntPtr handle = bitmap.GetHicon();
-        try
-        {
-            // Kopieren, damit das Icon das native Handle nicht überlebt.
-            using var temporary = Icon.FromHandle(handle);
-            return (Icon)temporary.Clone();
-        }
-        finally
-        {
-            DestroyIcon(handle);
-        }
-    }
-
-    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
-    private static extern bool DestroyIcon(IntPtr hIcon);
-
     public void Dispose()
     {
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
-        _icon.Dispose();
+
+        // Springt das Systemsymbol ein, gehört es uns nicht — es ist prozessweit
+        // zwischengespeichert und darf nicht freigegeben werden.
+        _icon?.Dispose();
     }
 }

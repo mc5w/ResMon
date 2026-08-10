@@ -1,4 +1,7 @@
 using LibreHardwareMonitor.Hardware;
+using ResMon.Core.Diagnostics;
+using ResMon.Core.Model;
+using ResMon.Core.Native;
 
 namespace ResMon.Core.Sensors;
 
@@ -19,6 +22,28 @@ public sealed record HardwareReading(
     bool CpuSensorsBlocked)
 {
     public static readonly HardwareReading Empty = new(null, null, null, null, null, null, null, 0, 0, false);
+
+    /// <summary>Alle Leistungssensoren, für die Aufschlüsselung im Reiter „Energie".</summary>
+    public IReadOnlyList<PowerRail> Rails { get; init; } = [];
+
+    /// <summary>Alle Lüfter, quer über Mainboard und Grafikkarte.</summary>
+    public IReadOnlyList<FanSample> Fans { get; init; } = [];
+
+    /// <summary>Alle Temperatursensoren, quer über alle Hardwareklassen.</summary>
+    public IReadOnlyList<TemperatureSample> Temperatures { get; init; } = [];
+
+    /// <summary>Temperatur am CPU-Sockel, gemessen vom Super-I/O-Chip des Mainboards.</summary>
+    public double? CpuSocketTempC { get; init; }
+
+    /// <summary>
+    /// False, wenn LibreHardwareMonitor keinen einzigen Sensor am Mainboard
+    /// findet. Dann fehlen Sockeltemperatur und Gehäuselüfter — beides hängt am
+    /// Super-I/O-Chip, den der Kernel-Treiber ansprechen muss.
+    /// </summary>
+    public bool BoardSensorsAvailable { get; init; }
+
+    /// <summary>Akkuzustand; auf Desktop-Rechnern <c>null</c>.</summary>
+    public BatteryMetrics? Battery { get; init; }
 }
 
 /// <summary>Ein einzelner Sensor, wie ihn das Probe-Werkzeug ausgibt.</summary>
@@ -30,6 +55,9 @@ public readonly record struct SensorInfo(string Hardware, string HardwareType, s
 /// </summary>
 public sealed class HardwareSource : IDisposable
 {
+    /// <summary>Name im Reiter „Logs".</summary>
+    private const string SensorSource = "Sensor-Treiber (LibreHardwareMonitor)";
+
     private readonly Computer _computer;
     private readonly UpdateVisitor _visitor = new();
     private bool _opened;
@@ -42,6 +70,9 @@ public sealed class HardwareSource : IDisposable
             IsGpuEnabled = true,
             IsMemoryEnabled = true,
             IsMotherboardEnabled = true,
+            // Für den Reiter „Energie": Lüfter hängen am Super-I/O-Chip des
+            // Mainboards, der Akku ist eine eigene Hardwareklasse.
+            IsBatteryEnabled = true,
         };
     }
 
@@ -67,6 +98,9 @@ public sealed class HardwareSource : IDisposable
             // Anwendung läuft dann ohne Temperaturen weiter, statt abzustürzen.
             OpenError = ex.Message;
             _opened = false;
+            DiagnosticLog.Report(SensorSource, ex,
+                "Die Sensorbibliothek ließ sich nicht öffnen — Temperaturen, Takt und Leistungsaufnahme fehlen",
+                DiagnosticSeverity.Error);
         }
 
         return _opened;
@@ -84,6 +118,7 @@ public sealed class HardwareSource : IDisposable
         catch (Exception ex)
         {
             OpenError = ex.Message;
+            DiagnosticLog.Report(SensorSource, ex, "Sensoren konnten nicht aktualisiert werden", DiagnosticSeverity.Error);
             return HardwareReading.Empty;
         }
 
@@ -94,9 +129,18 @@ public sealed class HardwareSource : IDisposable
         var coreClocks = new List<float>();
         var gpuTemps = new List<(string Name, float Value)>();
         var gpuPowers = new List<(string Name, float Value)>();
+        var rails = new List<PowerRail>();
+        var fans = new List<FanSample>();
+        var temperatures = new List<TemperatureSample>();
 
         foreach (IHardware hardware in _computer.Hardware)
         {
+            // Leistung, Lüfter und Temperaturen hängen quer über alle
+            // Hardwareklassen und teils erst in der Unterhardware — der
+            // Super-I/O-Chip des Mainboards ist ein eigenes IHardware unterhalb
+            // des Mainboards.
+            CollectSensors(hardware, rails, fans, temperatures);
+
             switch (hardware.HardwareType)
             {
                 case HardwareType.Cpu:
@@ -189,8 +233,224 @@ public sealed class HardwareSource : IDisposable
             gpuPower,
             ToBytes(gpuMemUsedMb ?? gpuMemUsedFallbackMb),
             ToBytes(gpuMemTotalMb),
-            cpuBlocked);
+            cpuBlocked)
+        {
+            Rails = rails,
+            Fans = fans,
+            Temperatures = temperatures,
+            Battery = ReadBattery(),
+            CpuSocketTempC = SocketTemperature(temperatures),
+            BoardSensorsAvailable = HasBoardSensors(),
+        };
     }
+
+    /// <summary>
+    /// Ob der Super-I/O-Chip des Mainboards überhaupt erreichbar ist. Er liefert
+    /// Sockeltemperatur und Gehäuselüfter; ohne geladenen Kernel-Treiber taucht
+    /// er in der Hardwareliste gar nicht erst auf.
+    /// </summary>
+    private bool HasBoardSensors()
+    {
+        foreach (IHardware hardware in _computer.Hardware)
+        {
+            if (hardware.HardwareType != HardwareType.Motherboard)
+                continue;
+
+            foreach (IHardware sub in hardware.SubHardware)
+            {
+                if (sub.Sensors.Length > 0)
+                    return true;
+            }
+
+            if (hardware.Sensors.Length > 0)
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Die Sockeltemperatur kommt nicht aus dem Prozessor, sondern vom
+    /// Mainboard: der Super-I/O-Chip misst am Sockel und nennt den Sensor je nach
+    /// Hersteller „CPU", „CPU Socket" oder „CPU Package". Sensoren der
+    /// CPU-Hardware selbst scheiden aus — die liefern die Die-Temperatur, die
+    /// schon in der Kachel steht.
+    /// </summary>
+    private static double? SocketTemperature(List<TemperatureSample> temperatures)
+    {
+        foreach (TemperatureSample sample in temperatures)
+        {
+            if (sample.Source != TemperatureSource.Board)
+                continue;
+
+            if (sample.Name.Contains("CPU", StringComparison.OrdinalIgnoreCase)
+                && !sample.Name.Contains("Fan", StringComparison.OrdinalIgnoreCase))
+            {
+                return sample.Celsius;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Sammelt Leistungs-, Lüfter- und Temperatursensoren rekursiv ein. Ein
+    /// Lüfter kann eine Drehzahl melden, eine Ansteuerung in Prozent oder beides;
+    /// die beiden Sensoren tragen denselben Namen und gehören deshalb in eine
+    /// Zeile.
+    /// </summary>
+    private static void CollectSensors(
+        IHardware hardware, List<PowerRail> rails, List<FanSample> fans, List<TemperatureSample> temperatures)
+    {
+        var rpmByName = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        var percentByName = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+
+        // Der Akku meldet seine Lade- und Entladeleistung ebenfalls als Power —
+        // das ist keine Aufnahme einer Komponente und steht in seiner eigenen
+        // Kachel.
+        bool isBattery = hardware.HardwareType == HardwareType.Battery;
+        TemperatureSource source = SourceOf(hardware.HardwareType);
+
+        foreach (ISensor sensor in hardware.Sensors)
+        {
+            if (sensor.Value is not { } value)
+                continue;
+
+            switch (sensor.SensorType)
+            {
+                case SensorType.Power when value > 0 && !isBattery:
+                    rails.Add(new PowerRail(hardware.Name, sensor.Name, value));
+                    break;
+                // 0 °C ist physikalisch möglich, aber praktisch immer ein
+                // gesperrter Sensortreiber. Ihn anzuzeigen wäre gelogen.
+                case SensorType.Temperature when value > 0:
+                    temperatures.Add(new TemperatureSample(hardware.Name, sensor.Name, value, source));
+                    break;
+                // Ein stehender Lüfter meldet 0 und gehört trotzdem in die Liste —
+                // "0 rpm" ist eine Aussage, ein fehlender Eintrag wäre keine.
+                case SensorType.Fan:
+                    rpmByName[sensor.Name] = value;
+                    break;
+                case SensorType.Control:
+                    percentByName[sensor.Name] = value;
+                    break;
+            }
+        }
+
+        foreach ((string name, double rpm) in rpmByName)
+            fans.Add(new FanSample(hardware.Name, name, rpm, Lookup(percentByName, name)));
+
+        // Ansteuerungen ohne zugehörigen Drehzahlsensor — bei Notebooks häufig der
+        // einzige Hinweis darauf, dass der Lüfter überhaupt läuft.
+        foreach ((string name, double percent) in percentByName)
+        {
+            if (!rpmByName.ContainsKey(name))
+                fans.Add(new FanSample(hardware.Name, name, null, percent));
+        }
+
+        foreach (IHardware sub in hardware.SubHardware)
+            CollectSensors(sub, rails, fans, temperatures);
+    }
+
+    /// <summary>
+    /// Der Super-I/O-Chip erscheint als eigene Hardware unterhalb des
+    /// Mainboards; seine Sensoren zählen als Mainboard-Sensoren.
+    /// </summary>
+    private static TemperatureSource SourceOf(HardwareType type) => type switch
+    {
+        HardwareType.Cpu => TemperatureSource.Cpu,
+        HardwareType.GpuNvidia or HardwareType.GpuAmd or HardwareType.GpuIntel => TemperatureSource.Gpu,
+        HardwareType.Motherboard or HardwareType.SuperIO or HardwareType.EmbeddedController => TemperatureSource.Board,
+        _ => TemperatureSource.Other,
+    };
+
+    private static double? Lookup(Dictionary<string, double> values, string name)
+        => values.TryGetValue(name, out double value) ? value : null;
+
+    /// <summary>
+    /// Akkuzustand aus zwei Quellen: Ladestand, Netzbetrieb und Restlaufzeit
+    /// kommen von Windows selbst und sind auf jedem Gerät verfügbar; Spannung,
+    /// Lade- oder Entladeleistung und die Kapazitäten liefert der Akkusensor,
+    /// sofern es ihn gibt. Fehlt beides, gibt es keinen Akku.
+    /// </summary>
+    private BatteryMetrics? ReadBattery()
+    {
+        SystemPower power = PowerStatus.Read();
+
+        double? charge = null, rate = null, voltage = null;
+        double? designed = null, full = null, remaining = null, degradation = null;
+        bool found = false;
+
+        foreach (IHardware hardware in _computer.Hardware)
+        {
+            if (hardware.HardwareType != HardwareType.Battery)
+                continue;
+
+            found = true;
+            foreach (ISensor sensor in hardware.Sensors)
+            {
+                if (sensor.Value is not { } value)
+                    continue;
+
+                switch (sensor.SensorType)
+                {
+                    case SensorType.Level when sensor.Name.Contains("Degradation", StringComparison.OrdinalIgnoreCase):
+                        degradation ??= value;
+                        break;
+                    case SensorType.Level:
+                        charge ??= value;
+                        break;
+                    case SensorType.Voltage:
+                        voltage ??= value;
+                        break;
+                    // Der Sensor ist vorzeichenbehaftet: positiv beim Laden,
+                    // negativ beim Entladen.
+                    case SensorType.Power:
+                        rate ??= value;
+                        break;
+                    case SensorType.Energy when sensor.Name.Contains("Designed", StringComparison.OrdinalIgnoreCase):
+                        designed ??= value;
+                        break;
+                    case SensorType.Energy when sensor.Name.Contains("Full", StringComparison.OrdinalIgnoreCase):
+                        full ??= value;
+                        break;
+                    case SensorType.Energy:
+                        remaining ??= value;
+                        break;
+                }
+            }
+
+            break;
+        }
+
+        if (!found && !power.HasBattery)
+            return null;
+
+        // Die Kapazitätssensoren melden Milliwattstunden.
+        return new BatteryMetrics(
+            charge ?? power.ChargePercent,
+            power.OnAcPower,
+            power.Charging,
+            rate,
+            voltage,
+            ToWattHours(designed),
+            ToWattHours(full),
+            ToWattHours(remaining),
+            degradation ?? Wear(designed, full),
+            power.Remaining);
+    }
+
+    private static double? ToWattHours(double? milliWattHours)
+        => milliWattHours is { } value && value > 0 ? value / 1000.0 : null;
+
+    /// <summary>
+    /// Verschleiß aus Soll- und Ist-Kapazität, falls der Akku ihn nicht selbst
+    /// meldet: wie viel Prozent der ursprünglichen Ladung fehlen.
+    /// </summary>
+    private static double? Wear(double? designed, double? full)
+        => designed is > 0 && full is > 0
+            ? Math.Max(0, (1 - full.Value / designed.Value) * 100)
+            : null;
 
     /// <summary>
     /// Listet alle gefundenen Sensoren auf. Grundlage für den Kontrollpunkt aus

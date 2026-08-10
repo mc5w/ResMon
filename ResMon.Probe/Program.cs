@@ -26,6 +26,8 @@ internal static class Program
             "counters" => DumpCounters(Iterations(args, 5)),
             "gpu" => DumpGpu(Iterations(args, 5)),
             "processes" => DumpProcesses(Iterations(args, 3)),
+            "connections" => DumpConnections(),
+            "energy" => DumpEnergy(Iterations(args, 3)),
             "paths" => DumpPaths(),
             "system" => DumpSystem(),
             _ => Help(),
@@ -41,6 +43,8 @@ internal static class Program
               counters [n]       CPU-, RAM-, GPU- und Netzaggregate n-mal im Sekundentakt ausgeben
               gpu [n]            GPU-Engine-Instanzen roh ausgeben
               processes [n]      Top-15-Prozesse nach CPU ausgeben
+              connections        Offene TCP- und UDP-Verbindungen mit besitzendem Prozess
+              energy [n]         Leistungsaufnahme, Lüfterdrehzahlen und Akku
               system             Systemübersicht: OS, CPU, GPU, RAM, Mainboard, Datenträger
               paths              Prüfen, welche PDH-Zählerpfade dieses System kennt
 
@@ -193,7 +197,9 @@ internal static class Program
         {
             query.Collect();
             IReadOnlyDictionary<int, GpuProcessUsage> gpuByPid = gpu.Read().ByProcess;
-            IReadOnlyList<ProcessSample> samples = sampler.Sample(gpuByPid, network.Read());
+            IReadOnlyList<NetConnection> connections = ConnectionSource.Read();
+            IReadOnlyList<ProcessSample> samples =
+                sampler.Sample(gpuByPid, network.Read(), ConnectionSource.ByProcess(connections));
 
             if (samples.Count == 0)
             {
@@ -202,14 +208,102 @@ internal static class Program
             }
 
             Console.WriteLine();
-            Console.WriteLine($"{"Name",-26} {"PID",7} {"CPU %",7} {"RAM MB",8} {"GPU %",7} {"↓ kB/s",9} {"↑ kB/s",9}  Dienste");
+            Console.WriteLine($"{"Name",-24} {"PID",7} {"CPU %",7} {"RAM MB",8} {"Art",-12} {"Benutzer",-22} Ports");
             foreach (ProcessSample sample in samples.OrderByDescending(s => s.CpuPercent).Take(15))
             {
-                string names = sample.ServiceNames.Count > 0 ? string.Join(", ", sample.ServiceNames) : "";
                 Console.WriteLine(
-                    $"{Truncate(sample.Name, 26),-26} {sample.Pid,7} {sample.CpuPercent,7:F1} " +
-                    $"{sample.WorkingSetBytes / 1048576,8} {sample.GpuPercent,7:F1} " +
-                    $"{sample.NetReceivedBytesPerSec / 1024,9:F1} {sample.NetSentBytesPerSec / 1024,9:F1}  {Truncate(names, 44)}");
+                    $"{Truncate(sample.Name, 24),-24} {sample.Pid,7} {sample.CpuPercent,7:F1} " +
+                    $"{sample.WorkingSetBytes / 1048576,8} {sample.Category,-12} " +
+                    $"{Truncate(sample.UserName ?? "—", 22),-22} {Truncate(Ports(sample), 30)}");
+            }
+
+            Thread.Sleep(2000);
+        }
+
+        return 0;
+    }
+
+    private static string Ports(ProcessSample sample)
+    {
+        var parts = new List<string>();
+        if (sample.ListeningTcpPorts.Count > 0)
+            parts.Add("TCP " + string.Join(", ", sample.ListeningTcpPorts));
+        if (sample.ListeningUdpPorts.Count > 0)
+            parts.Add("UDP " + string.Join(", ", sample.ListeningUdpPorts));
+        if (sample.ConnectionCount > 0)
+            parts.Add($"{sample.ConnectionCount} Verb.");
+        return string.Join("  ", parts);
+    }
+
+    private static int DumpConnections()
+    {
+        IReadOnlyList<NetConnection> connections = ConnectionSource.Read();
+        Dictionary<int, ProcessTreeEntry> tree = Toolhelp.Snapshot();
+
+        Console.WriteLine($"{connections.Count} Einträge.");
+        Console.WriteLine();
+        Console.WriteLine($"{"Proto",-7} {"Lokal",-46} {"Remote",-46} {"Zustand",-13} {"PID",7}  Prozess");
+
+        foreach (NetConnection connection in connections
+                     .OrderBy(c => c.Protocol, StringComparer.Ordinal)
+                     .ThenBy(c => c.LocalPort))
+        {
+            string local = $"{connection.LocalAddress}:{connection.LocalPort}";
+            string remote = connection.RemoteAddress is null
+                ? "—"
+                : $"{connection.RemoteAddress}:{connection.RemotePort}";
+            string name = tree.TryGetValue(connection.Pid, out ProcessTreeEntry entry) ? entry.ExeName : "";
+
+            Console.WriteLine(
+                $"{connection.Protocol,-7} {Truncate(local, 46),-46} {Truncate(remote, 46),-46} " +
+                $"{connection.State,-13} {connection.Pid,7}  {name}");
+        }
+
+        return 0;
+    }
+
+    private static int DumpEnergy(int iterations)
+    {
+        using var hardware = new HardwareSource();
+        if (!hardware.Open())
+        {
+            Console.Error.WriteLine($"LibreHardwareMonitor konnte nicht geöffnet werden: {hardware.OpenError}");
+            Console.Error.WriteLine("Als Administrator ausführen.");
+            return 2;
+        }
+
+        for (int i = 0; i <= iterations; i++)
+        {
+            HardwareReading reading = hardware.Update();
+
+            Console.WriteLine();
+            Console.WriteLine($"Leistungssensoren ({reading.Rails.Count})");
+            foreach (PowerRail rail in reading.Rails.OrderByDescending(r => r.Watts))
+                Console.WriteLine($"    {rail.Hardware,-28} {rail.Name,-26} {rail.Watts,8:F1} W");
+
+            Console.WriteLine($"Lüfter ({reading.Fans.Count})");
+            foreach (FanSample fan in reading.Fans)
+            {
+                string rpm = fan.Rpm is { } value ? $"{value,8:F0} rpm" : $"{"—",12}";
+                string percent = fan.Percent is { } control ? $"{control,7:F0} %" : "";
+                Console.WriteLine($"    {fan.Hardware,-28} {fan.Name,-26} {rpm} {percent}");
+            }
+
+            if (reading.Battery is { } battery)
+            {
+                Console.WriteLine("Akku");
+                Console.WriteLine($"    Ladestand      {Format(battery.ChargePercent, "%")}");
+                Console.WriteLine($"    Netzbetrieb    {battery.OnAcPower}, lädt: {battery.Charging}");
+                Console.WriteLine($"    Leistung       {Format(battery.RateW, "W")}");
+                Console.WriteLine($"    Spannung       {Format(battery.VoltageV, "V")}");
+                Console.WriteLine($"    Kapazität      {Format(battery.RemainingCapacityWh, "Wh")} von " +
+                                  $"{Format(battery.FullChargedCapacityWh, "Wh")} (neu: {Format(battery.DesignedCapacityWh, "Wh")})");
+                Console.WriteLine($"    Verschleiß     {Format(battery.DegradationPercent, "%")}");
+                Console.WriteLine($"    Restlaufzeit   {battery.Remaining?.ToString(@"hh\:mm") ?? "—"}");
+            }
+            else
+            {
+                Console.WriteLine("Akku: keiner gefunden.");
             }
 
             Thread.Sleep(2000);
@@ -281,6 +375,19 @@ internal static class Program
             Console.WriteLine(group.Title);
             foreach (InfoItem item in group.Items)
                 Console.WriteLine($"    {item.Label,-24} {item.Value}");
+            Console.WriteLine();
+        }
+
+        foreach (DeviceGroup group in info.Devices)
+        {
+            Console.WriteLine($"{group.Title} ({group.Items.Count})");
+            foreach (DeviceEntry device in group.Items)
+            {
+                Console.WriteLine($"    [{device.Health,-7}] {device.Name}  — {device.Status}");
+                foreach (InfoItem detail in device.Details)
+                    Console.WriteLine($"        {detail.Label,-16} {detail.Value}");
+            }
+
             Console.WriteLine();
         }
 

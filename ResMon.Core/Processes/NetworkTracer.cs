@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using Microsoft.Diagnostics.Tracing.Parsers;
 using Microsoft.Diagnostics.Tracing.Session;
+using ResMon.Core.Diagnostics;
 
 namespace ResMon.Core.Processes;
 
@@ -75,6 +76,8 @@ public sealed class NetworkTracer : IDisposable
                 // Ohne Adminrechte oder bei blockierten Kernel-Sitzungen läuft die
                 // Anwendung ohne Netzspalten weiter.
                 Error = ex.Message;
+                DiagnosticLog.Report("Netzverkehr je Prozess (ETW)", ex,
+                    "Die Kernel-Sitzung ließ sich nicht starten — die Spalten Download und Upload bleiben leer");
                 _session?.Dispose();
                 _session = null;
             }
@@ -157,6 +160,7 @@ public sealed class NetworkTracer : IDisposable
         catch (Exception ex)
         {
             Error = ex.Message;
+            DiagnosticLog.Report("Netzverkehr je Prozess (ETW)", ex, "Die laufende Kernel-Sitzung brach ab");
         }
     }
 
