@@ -24,6 +24,19 @@ public readonly record struct HostDiagnostics(
     /// <summary>Kein Zugriff auf den Super-I/O-Chip: keine Sockeltemperatur, keine Gehäuselüfter.</summary>
     public bool BoardSensorsMissing { get; init; }
 
+    /// <summary>
+    /// Ob der Rechner einen Akku hat. Auf Notebooks fehlt der Super-I/O-Chip
+    /// nicht wegen eines gesperrten Treibers, sondern weil dort der Embedded
+    /// Controller zuständig ist — das ist ein anderer Hinweis.
+    /// </summary>
+    public bool HasBattery { get; init; }
+
+    /// <summary>Ob die ACPI-Thermalzonen als treiberfreier Ersatz einspringen können.</summary>
+    public bool ThermalZonesAvailable { get; init; }
+
+    /// <summary>Ob sich der Takt ohne Sensortreiber aus dem Leistungszähler schätzen lässt.</summary>
+    public bool ClockEstimateAvailable { get; init; }
+
     /// <summary>Fehlermeldung, falls sich die Sensorbibliothek nicht öffnen ließ.</summary>
     public string? SensorDriverError { get; init; }
 
@@ -101,6 +114,7 @@ public static class WebBridge
             {
                 percent = Round(snapshot.Cpu.TotalPercent),
                 tempC = Round(snapshot.Cpu.PackageTempC),
+                tempOrigin = snapshot.Cpu.TempOrigin,
                 clockMhz = Round(snapshot.Cpu.ClockMhz, 0),
                 powerW = Round(snapshot.Cpu.PackagePowerW),
             },
@@ -180,8 +194,10 @@ public static class WebBridge
             {
                 percent = Round(snapshot.Cpu.TotalPercent),
                 tempC = Round(snapshot.Cpu.PackageTempC),
+                tempOrigin = snapshot.Cpu.TempOrigin,
                 socketTempC = Round(snapshot.Cpu.SocketTempC),
                 clockMhz = Round(snapshot.Cpu.ClockMhz, 0),
+                clockEstimated = snapshot.Cpu.ClockIsEstimated,
                 powerW = Round(snapshot.Cpu.PackagePowerW),
                 cores = snapshot.Cpu.PerCorePercent.Select(c => Round(c, 0)).ToArray(),
             },
@@ -229,6 +245,9 @@ public static class WebBridge
                 legacyProcessCounters = diagnostics.LegacyProcessCounters,
                 networkTraceError = diagnostics.NetworkTraceError,
                 boardSensorsMissing = diagnostics.BoardSensorsMissing,
+                hasBattery = diagnostics.HasBattery,
+                thermalZonesAvailable = diagnostics.ThermalZonesAvailable,
+                clockEstimateAvailable = diagnostics.ClockEstimateAvailable,
                 sensorDriverError = diagnostics.SensorDriverError,
                 elevated = diagnostics.Elevated,
             },

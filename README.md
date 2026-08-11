@@ -151,19 +151,50 @@ verpasst hat.
 Ist die **Speicherintegrität** (Kernisolierung) oder die **Sperrliste für
 verwundbare Treiber** aktiv, lädt LibreHardwareMonitors Kernel-Treiber
 `WinRing0` nicht — er steht auf Microsofts Sperrliste. Die CPU-Sensoren
-existieren dann zwar, melden aber konstant 0.
+existieren dann zwar, liefern aber nichts: je nach Windows-Fassung melden sie
+konstant 0 oder gar keinen Wert.
 
-ResMon erkennt das und zeigt „–" statt einer erfundenen Null; das Detailfenster
-blendet einen Hinweis ein. GPU-Werte kommen über NVAPI im User-Mode und sind
-nicht betroffen. Zu prüfen ist der Zustand mit:
+ResMon erkennt beide Formen und zeigt „–" statt einer erfundenen Null. Zu
+prüfen ist der Zustand mit:
 
 ```bash
 reg query "HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity" /v Enabled
 ```
 
-Die Speicherintegrität abzuschalten würde die Temperaturanzeige aktivieren,
-senkt aber das Schutzniveau des Systems spürbar. Das ist eine bewusste
-Abwägung — ResMon nimmt sie niemandem ab.
+Die Speicherintegrität abzuschalten würde die Sensoren aktivieren, senkt aber
+das Schutzniveau des Systems spürbar. Das ist eine bewusste Abwägung — ResMon
+nimmt sie niemandem ab und kommt stattdessen so weit wie möglich ohne den
+Treiber aus:
+
+| Wert | ohne Treiber | Quelle |
+|---|---|---|
+| CPU-Temperatur | ersatzweise | ACPI-Thermalzone `\_TZ.CPU…` über PDH `\Thermal Zone Information` |
+| CPU-Takt | ersatzweise | Basistakt × `% Processor Performance`, wie im Task-Manager |
+| CPU-Leistung | nein | steht nur in den Energiezählern des Prozessors (RAPL) |
+| GPU-Werte | ja | die Sensorbibliothek liest sie im User-Mode |
+| Sockeltemperatur, Gehäuselüfter | nein | Super-I/O-Chip des Mainboards |
+
+Die Ersatzwerte sind als solche gekennzeichnet: die Temperatur trägt „(ACPI-Zone)",
+der gerechnete Takt ein „≈". Eine Thermalzone misst die Umgebung des Prozessors,
+nicht seinen Die — sie liegt niedriger und folgt Lastspitzen träger.
+
+## Notebooks
+
+Auf Notebooks fehlen **Sockeltemperatur und Gehäuselüfter** unabhängig vom
+Treiber. An der Stelle des Super-I/O-Chips sitzt dort ein Embedded Controller,
+den jeder Hersteller anders anspricht; die Sensorbibliothek kennt dafür keinen
+allgemeinen Weg, und Windows selbst kennt die Drehzahl ebenso wenig. ResMon
+benennt das als eigene Ursache, statt es dem gesperrten Treiber anzulasten —
+erkennbar am vorhandenen Akku.
+
+Die ACPI-Thermalzonen sind auf Notebooks meist gut belegt und stehen im Reiter
+„Energie" als eigene Gruppe. Zonennamen vergibt der Hersteller; übersetzt werden
+nur die eindeutigen (`CPUZ`, `GFXZ`, `PCHZ`, `BATZ`, `SKIN`), alle anderen
+behalten ihren Bezeichner.
+
+Grafik im Prozessor hat keinen eigenen Speicher: dort zeigt ResMon den Anteil am
+Arbeitsspeicher (`D3D Shared Memory`), und zwar nur dann, wenn die Karte keinen
+eigenen meldet.
 
 ## Netzwerk und Datenträger
 

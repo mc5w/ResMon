@@ -25,6 +25,7 @@ public sealed class Collector : IDisposable
     private readonly GpuEngineSource _gpu;
     private readonly NetworkSource _network;
     private readonly DiskSource _disk;
+    private readonly ThermalZoneSource _zones;
     private readonly HardwareSource _hardware = new();
     private readonly ServiceResolver _services = new();
     private readonly AppErrorLog _faults = new();
@@ -58,6 +59,7 @@ public sealed class Collector : IDisposable
         _gpu = new GpuEngineSource(_aggregateQuery);
         _network = new NetworkSource(_aggregateQuery);
         _disk = new DiskSource(_aggregateQuery);
+        _zones = new ThermalZoneSource(_aggregateQuery);
         _processes = new ProcessSampler(_services, _faults);
         History = new RingBuffer<AggregateSample>(HistoryCapacity);
 
@@ -105,6 +107,23 @@ public sealed class Collector : IDisposable
     /// Hardware-Takt aussagekräftig.
     /// </summary>
     public bool BoardSensorsMissing => !_lastHardware.BoardSensorsAvailable;
+
+    /// <summary>
+    /// True, wenn die ACPI-Thermalzonen gelesen werden können. Sie sind der
+    /// treiberfreie Ersatz, wenn der Sensortreiber ausfällt.
+    /// </summary>
+    public bool ThermalZonesAvailable => _zones.Available;
+
+    /// <summary>True, wenn sich der Takt auch ohne Sensortreiber schätzen lässt.</summary>
+    public bool ClockEstimateAvailable => _counters.ClockEstimateAvailable;
+
+    /// <summary>
+    /// True, sobald ein Akku gefunden wurde. Für die Sensorik ist das der
+    /// Unterschied zwischen Notebook und Desktop: Notebooks führen ihre Lüfter
+    /// und Temperaturen am Embedded Controller, nicht an einem lesbaren
+    /// Super-I/O-Chip. Erst nach dem ersten Hardware-Takt aussagekräftig.
+    /// </summary>
+    public bool HasBattery => _lastHardware.Battery is not null;
 
     /// <summary>
     /// Steuert die Prozess-Enumeration. Bleibt aus, solange das Detailfenster
@@ -189,6 +208,7 @@ public sealed class Collector : IDisposable
             GpuEngineReading gpu;
             NetworkMetrics network;
             DiskMetrics disk;
+            ThermalZoneReading zones;
             lock (_aggregateGate)
             {
                 // Das erste Sample nach dem Start liefert keine Deltas und wird verworfen.
@@ -199,22 +219,33 @@ public sealed class Collector : IDisposable
                 gpu = _gpu.Read();
                 network = _network.Read();
                 disk = _disk.Read();
+                zones = _zones.Read();
             }
 
             _lastGpuByPid = gpu.ByProcess;
 
             HardwareReading hardware = _lastHardware;
+
+            // Drei Quellen, absteigend nach Aussagekraft: der Prozessor misst am
+            // Die, das Mainboard am Sockel, die Firmware in ihrer Thermalzone.
+            // Die letzte braucht keinen Kernel-Treiber und ist deshalb oft die
+            // einzige, die übrig bleibt.
+            double? cpuTemp = hardware.CpuPackageTempC ?? hardware.CpuSocketTempC ?? zones.CpuZoneTempC;
+            CpuTempOrigin tempOrigin = hardware.CpuPackageTempC is not null ? CpuTempOrigin.Die
+                : hardware.CpuSocketTempC is not null ? CpuTempOrigin.Socket
+                : zones.CpuZoneTempC is not null ? CpuTempOrigin.AcpiZone
+                : CpuTempOrigin.None;
+
             var cpu = new CpuMetrics(
                 counters.CpuTotalPercent,
                 counters.CpuPerCorePercent,
-                // Ohne Die-Temperatur ist die Sockeltemperatur die beste Auskunft,
-                // die es gibt — sie kommt vom Mainboard und überlebt einen
-                // gesperrten Sensortreiber.
-                hardware.CpuPackageTempC ?? hardware.CpuSocketTempC,
-                hardware.CpuClockMhz,
+                cpuTemp,
+                hardware.CpuClockMhz ?? counters.ClockMhz,
                 hardware.CpuPackagePowerW)
             {
                 SocketTempC = hardware.CpuSocketTempC,
+                TempOrigin = tempOrigin,
+                ClockIsEstimated = hardware.CpuClockMhz is null && counters.ClockMhz is not null,
             };
 
             // Fällt der PDH-Zählersatz aus, springt die LHM-Last als Ersatz ein.
@@ -237,6 +268,13 @@ public sealed class Collector : IDisposable
                 counters.CommittedBytes,
                 counters.MemoryPercent);
 
+            // Die Thermalzonen stehen neben den Sensoren, nicht an ihrer Stelle:
+            // sie messen die Umgebung einer Komponente, und die Oberfläche führt
+            // sie deshalb als eigene Gruppe.
+            IReadOnlyList<TemperatureSample> temperatures = hardware.Temperatures;
+            if (zones.Zones.Count > 0)
+                temperatures = [.. hardware.Temperatures, .. zones.Zones];
+
             var energy = new EnergyMetrics(
                 hardware.CpuPackagePowerW,
                 hardware.GpuPowerW,
@@ -244,7 +282,7 @@ public sealed class Collector : IDisposable
                 hardware.Fans,
                 hardware.Battery)
             {
-                Temperatures = hardware.Temperatures,
+                Temperatures = temperatures,
             };
 
             var timestamp = DateTime.Now;

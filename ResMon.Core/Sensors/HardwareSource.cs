@@ -123,8 +123,10 @@ public sealed class HardwareSource : IDisposable
         }
 
         double? cpuTemp = null, cpuClock = null, cpuPower = null;
-        double? gpuLoad = null, gpuFan = null;
+        double? gpuLoad = null, gpuLoadFallback = null, gpuFan = null;
         double? gpuMemUsedMb = null, gpuMemUsedFallbackMb = null, gpuMemTotalMb = null;
+        double? gpuSharedUsedMb = null, gpuSharedTotalMb = null;
+        bool cpuSensorsPresent = false;
         var coreTemps = new List<float>();
         var coreClocks = new List<float>();
         var gpuTemps = new List<(string Name, float Value)>();
@@ -146,6 +148,12 @@ public sealed class HardwareSource : IDisposable
                 case HardwareType.Cpu:
                     foreach (ISensor sensor in hardware.Sensors)
                     {
+                        // Vor dem Wert geprüft: Ob ein Sensor überhaupt angelegt
+                        // ist, entscheidet später darüber, ob ein fehlender Wert
+                        // „gibt es nicht" oder „nicht lesbar" heißt.
+                        if (sensor.SensorType is SensorType.Temperature or SensorType.Clock)
+                            cpuSensorsPresent = true;
+
                         if (sensor.Value is not { } value)
                             continue;
 
@@ -184,6 +192,11 @@ public sealed class HardwareSource : IDisposable
                             case SensorType.Load when sensor.Name.Contains("Core", StringComparison.OrdinalIgnoreCase):
                                 gpuLoad ??= value;
                                 break;
+                            // Grafik im Prozessor kennt keine „GPU Core"-Last;
+                            // sie meldet nur die Auslastung ihrer D3D-Engines.
+                            case SensorType.Load when sensor.Name.Equals("D3D 3D", StringComparison.OrdinalIgnoreCase):
+                                gpuLoadFallback ??= value;
+                                break;
                             case SensorType.Fan:
                                 gpuFan ??= value;
                                 break;
@@ -201,6 +214,16 @@ public sealed class HardwareSource : IDisposable
                             case SensorType.SmallData when sensor.Name.Contains("Dedicated Memory Used", StringComparison.OrdinalIgnoreCase):
                                 gpuMemUsedFallbackMb ??= value;
                                 break;
+                            // Grafik im Prozessor hat keinen eigenen Speicher. Sie
+                            // meldet nur, was sie sich aus dem Arbeitsspeicher
+                            // nimmt — auch dedizierte Karten führen diese Sensoren,
+                            // deshalb kommen sie nur zum Zug, wenn sonst nichts da ist.
+                            case SensorType.SmallData when sensor.Name.Equals("D3D Shared Memory Used", StringComparison.OrdinalIgnoreCase):
+                                gpuSharedUsedMb ??= value;
+                                break;
+                            case SensorType.SmallData when sensor.Name.Equals("D3D Shared Memory Total", StringComparison.OrdinalIgnoreCase):
+                                gpuSharedTotalMb ??= value;
+                                break;
                         }
                     }
 
@@ -217,22 +240,34 @@ public sealed class HardwareSource : IDisposable
         double? gpuTemp = Prefer(gpuTemps, "Core");
         double? gpuPower = Prefer(gpuPowers, "Package");
 
-        // Auf gesperrtem WinRing0 (Speicherintegrität, Sperrliste für verwundbare
-        // Treiber) existieren die CPU-Sensoren, melden aber konstant 0. Eine
-        // CPU-Temperatur von 0 °C oder ein Takt von 0 MHz ist physikalisch
-        // unmöglich — das als Messwert anzuzeigen wäre gelogen.
-        bool cpuBlocked = cpuTemp is <= 0 || cpuClock is <= 0;
+        // Ohne geladenen WinRing0 (Speicherintegrität, Sperrliste für verwundbare
+        // Treiber) legt LibreHardwareMonitor die CPU-Sensoren zwar an, bekommt
+        // aber nichts aus den Modellregistern: je nach Fassung melden sie dann
+        // konstant 0 oder überhaupt nichts. Beides heißt „vorhanden, aber nicht
+        // lesbar" — und 0 °C bei laufendem Prozessor ist ohnehin keine Messung.
+        bool cpuBlocked = cpuSensorsPresent && cpuTemp is null or <= 0 && cpuClock is null or <= 0;
+
+        // Erst wenn die Karte keinen eigenen Speicher meldet, zählt der Anteil am
+        // Arbeitsspeicher — sonst stünden bei einer dedizierten Karte zwei
+        // verschiedene Speicher in einer Zeile.
+        double? memUsedMb = gpuMemUsedMb ?? gpuMemUsedFallbackMb;
+        double? memTotalMb = gpuMemTotalMb;
+        if (memUsedMb is null && memTotalMb is null)
+        {
+            memUsedMb = gpuSharedUsedMb;
+            memTotalMb = gpuSharedTotalMb;
+        }
 
         return new HardwareReading(
             NonZero(cpuTemp),
             NonZero(cpuClock),
             NonZero(cpuPower),
             gpuTemp,
-            gpuLoad,
+            gpuLoad ?? gpuLoadFallback,
             gpuFan,
             gpuPower,
-            ToBytes(gpuMemUsedMb ?? gpuMemUsedFallbackMb),
-            ToBytes(gpuMemTotalMb),
+            ToBytes(memUsedMb),
+            ToBytes(memTotalMb),
             cpuBlocked)
         {
             Rails = rails,

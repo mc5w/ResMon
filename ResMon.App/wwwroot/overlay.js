@@ -222,6 +222,12 @@ function render(data) {
 
     updateRow('cpu', data.cpu.percent, data.cpu.tempC, showTemps, data.visible.cpu);
     updateRow('gpu', data.gpu.percent, data.gpu.tempC, showTemps, data.visible.gpu, data.gpu.available);
+
+    // Im Overlay ist kein Platz für eine Herkunftsangabe; sie steht deshalb im
+    // Tooltip. Eine ACPI-Zone misst neben dem Prozessor, nicht in ihm.
+    rows.cpu.temp.title = data.cpu.tempOrigin === 'acpiZone'
+        ? 'Aus der ACPI-Thermalzone des Prozessors, nicht von seinem Die-Sensor: niedriger und träger.'
+        : '';
     updateRow('ram', data.ram.percent, null, false, data.visible.ram);
 
     updateRateRow('net', data.visible.net, data.net.available, data.net.rx, data.net.tx, data.history.net);

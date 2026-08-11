@@ -150,13 +150,13 @@
             <section class="info-card">
                 <h4>Temperaturen</h4>
                 <div id="temp-list" class="temp-list"></div>
-                <p class="field-hint" id="temp-empty">Es werden keine Temperatursensoren gemeldet. Prozessor- und Sockeltemperatur brauchen den Sensor-Treiber; Grafikkarten melden ihre Werte auch ohne ihn.</p>
+                <p class="field-hint" id="temp-empty">Es werden keine Temperatursensoren gemeldet. Prozessor- und Sockeltemperatur brauchen den Sensor-Treiber; Grafikkarten melden ihre Werte auch ohne ihn, und die ACPI-Thermalzonen kämen ganz ohne Treiber aus — sofern dieses System sie führt.</p>
             </section>
 
             <section class="info-card">
                 <h4>Lüfter</h4>
                 <div id="fan-list" class="fan-list"></div>
-                <p class="field-hint" id="fan-empty">Es werden keine Lüfter gemeldet. Gehäuselüfter hängen am Super-I/O-Chip des Mainboards — ist dessen Treiber blockiert, bleibt die Liste leer. Notebooks geben ihre Drehzahlen oft überhaupt nicht über die Sensorschnittstelle heraus, sondern nur an die Steuerungssoftware des Herstellers.</p>
+                <p class="field-hint" id="fan-empty">Es werden keine Lüfter gemeldet. Gehäuselüfter hängen am Super-I/O-Chip des Mainboards — ist dessen Treiber blockiert, bleibt die Liste leer. In Notebooks sitzt an dessen Stelle ein Embedded Controller, den jeder Hersteller anders anspricht; dort gibt es die Drehzahl nur über die Steuerungssoftware des Herstellers, auch mit geladenem Treiber.</p>
             </section>
 
             <section class="info-card">

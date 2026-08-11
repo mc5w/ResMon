@@ -30,6 +30,26 @@ public sealed record SystemSnapshot(
     public IReadOnlyList<NetConnection> Connections { get; init; } = [];
 }
 
+/// <summary>
+/// Woher die angezeigte CPU-Temperatur stammt. Die drei Quellen messen nicht
+/// dasselbe, und der Unterschied gehört an die Oberfläche statt in eine
+/// gemeinsame Zahl.
+/// </summary>
+public enum CpuTempOrigin
+{
+    /// <summary>Keine Quelle liefert einen Wert.</summary>
+    None,
+
+    /// <summary>Aus dem Prozessor selbst, gemessen am Die. Reagiert sofort.</summary>
+    Die,
+
+    /// <summary>Vom Super-I/O-Chip des Mainboards, gemessen am Sockel.</summary>
+    Socket,
+
+    /// <summary>Aus einer ACPI-Thermalzone der Firmware. Träge, aber treiberfrei.</summary>
+    AcpiZone,
+}
+
 public sealed record CpuMetrics(
     double TotalPercent,
     double[] PerCorePercent,
@@ -44,6 +64,19 @@ public sealed record CpuMetrics(
     /// Sensortreiber ist sie oft der einzige verfügbare CPU-Temperaturwert.
     /// </summary>
     public double? SocketTempC { get; init; }
+
+    /// <summary>
+    /// Woher <see cref="PackageTempC"/> kommt. Der Wert fällt der Reihe nach von
+    /// der Die- auf die Sockeltemperatur und von dort auf die ACPI-Thermalzone
+    /// zurück — die Oberfläche muss sagen können, welche davon gerade dasteht.
+    /// </summary>
+    public CpuTempOrigin TempOrigin { get; init; }
+
+    /// <summary>
+    /// True, wenn der Takt nicht aus dem Prozessor gelesen, sondern aus
+    /// Basistakt und <c>% Processor Performance</c> gerechnet ist.
+    /// </summary>
+    public bool ClockIsEstimated { get; init; }
 }
 
 public sealed record GpuMetrics(
@@ -100,6 +133,12 @@ public enum TemperatureSource
     Cpu,
     Gpu,
     Board,
+
+    /// <summary>
+    /// Thermalzone der Firmware, gelesen über ACPI statt über einen
+    /// Sensortreiber. Misst die Umgebung einer Komponente, nicht sie selbst.
+    /// </summary>
+    Acpi,
 }
 
 /// <summary>Ein Temperatursensor, gleich welcher Hardware er gehört.</summary>

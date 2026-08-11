@@ -175,6 +175,9 @@ public partial class App : Application
                 _collector.NetworkTraceError)
             {
                 BoardSensorsMissing = _collector.BoardSensorsMissing,
+                HasBattery = _collector.HasBattery,
+                ThermalZonesAvailable = _collector.ThermalZonesAvailable,
+                ClockEstimateAvailable = _collector.ClockEstimateAvailable,
                 SensorDriverError = _collector.HardwareError,
                 Elevated = IsElevated,
             });

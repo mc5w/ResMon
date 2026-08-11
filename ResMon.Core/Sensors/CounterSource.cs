@@ -1,3 +1,4 @@
+using Microsoft.Win32;
 using ResMon.Core.Native;
 
 namespace ResMon.Core.Sensors;
@@ -9,7 +10,15 @@ public sealed record CounterReading(
     long MemoryUsedBytes,
     long MemoryTotalBytes,
     long CommittedBytes,
-    double MemoryPercent);
+    double MemoryPercent)
+{
+    /// <summary>
+    /// Der aus Basistakt und <c>% Processor Performance</c> gerechnete Takt, oder
+    /// <c>null</c>, wenn eines von beidem fehlt. Nur als Ersatz gedacht: der
+    /// Sensortreiber liest den Takt direkt aus dem Prozessor.
+    /// </summary>
+    public double? ClockMhz { get; init; }
+}
 
 /// <summary>
 /// CPU- und RAM-Aggregate aus PDH (DESIGN.md §8.2). Die Zähler hängen an einer
@@ -22,11 +31,20 @@ public sealed class CounterSource
     private const string CpuTotalTime = @"\Processor Information(_Total)\% Processor Time";
     private const string CpuPerCoreUtility = @"\Processor Information(*)\% Processor Utility";
     private const string CpuPerCoreTime = @"\Processor Information(*)\% Processor Time";
+    private const string CpuPerformance = @"\Processor Information(_Total)\% Processor Performance";
     private const string CommittedBytes = @"\Memory\Committed Bytes";
+
+    /// <summary>
+    /// Obergrenze für den Turbo-Faktor. Kein Prozessor legt das Vierfache seines
+    /// Basistakts auf; ein solcher Wert wäre ein Zählerfehler.
+    /// </summary>
+    private const double MaximumPerformancePercent = 400;
 
     private readonly PdhCounter? _cpuTotal;
     private readonly PdhCounter? _cpuPerCore;
+    private readonly PdhCounter? _cpuPerformance;
     private readonly PdhCounter? _committed;
+    private readonly double _baseClockMhz = ReadBaseClockMhz();
 
     public CounterSource(PdhQuery query)
     {
@@ -40,11 +58,18 @@ public sealed class CounterSource
         }
 
         _cpuPerCore = query.TryAddCounter(CpuPerCoreUtility) ?? query.TryAddCounter(CpuPerCoreTime);
+        _cpuPerformance = query.TryAddCounter(CpuPerformance);
         _committed = query.TryAddCounter(CommittedBytes);
     }
 
     /// <summary>True, wenn statt <c>% Processor Utility</c> nur <c>% Processor Time</c> verfügbar war.</summary>
     public bool UsesUtilityFallback { get; }
+
+    /// <summary>
+    /// True, wenn sich der Takt ohne Sensortreiber schätzen lässt — Basistakt und
+    /// Leistungszähler sind beide vorhanden.
+    /// </summary>
+    public bool ClockEstimateAvailable => _cpuPerformance is not null && _baseClockMhz > 0;
 
     public CounterReading Read()
     {
@@ -65,7 +90,46 @@ public sealed class CounterSource
             mem.UsedBytes,
             mem.TotalBytes,
             committed,
-            Math.Clamp(mem.UsedPercent, 0, 100));
+            Math.Clamp(mem.UsedPercent, 0, 100))
+        {
+            ClockMhz = ReadClock(),
+        };
+    }
+
+    /// <summary>
+    /// Der Takt ohne Sensortreiber: <c>% Processor Performance</c> ist das
+    /// Verhältnis zum Basistakt, nicht selbst eine Frequenz — erst beide zusammen
+    /// ergeben MHz. Denselben Weg geht der Task-Manager, und wie dort darf der
+    /// Wert über 100 % liegen, sonst wäre der Turbo unsichtbar.
+    /// </summary>
+    private double? ReadClock()
+    {
+        if (_baseClockMhz <= 0 || _cpuPerformance is null)
+            return null;
+
+        if (!_cpuPerformance.TryGetDouble(out double percent, noCap100: true))
+            return null;
+
+        return percent is > 0 and <= MaximumPerformancePercent ? _baseClockMhz * percent / 100.0 : null;
+    }
+
+    /// <summary>
+    /// Der Basistakt, wie ihn der Kernel beim Start hinterlegt — dieselbe Zahl,
+    /// die die Systemübersicht als „Basistakt" zeigt.
+    /// </summary>
+    private static double ReadBaseClockMhz()
+    {
+        try
+        {
+            using RegistryKey? key = Registry.LocalMachine.OpenSubKey(
+                @"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+            return key?.GetValue("~MHz") is int mhz && mhz > 0 ? mhz : 0;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException)
+        {
+            // Ohne Basistakt entfällt nur die Schätzung; alles andere läuft weiter.
+            return 0;
+        }
     }
 
     /// <summary>

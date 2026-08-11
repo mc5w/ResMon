@@ -318,10 +318,43 @@ mit, und als Sockelwert gilt nur ein Sensor der Herkunft `Board`.
 
 **Wenn der Kernel-Treiber fehlt**, taucht der Super-I/O-Chip in der
 Hardwareliste gar nicht erst auf: keine Sockeltemperatur, keine Gehäuselüfter.
-Die CPU-Sensoren existieren dann zwar, melden aber konstant 0. Beides wird
-erkannt (`CpuSensorsBlocked`, `BoardSensorsAvailable`) und als eine gemeinsame
-Meldung angezeigt, statt leere Felder stehen zu lassen. Die GPU ist davon nicht
-betroffen — NVAPI braucht keinen eigenen Treiber.
+Die CPU-Sensoren existieren dann zwar, liefern aber nichts — je nach
+Windows-Fassung konstant 0 oder gar keinen Wert. `CpuSensorsBlocked` erkennt
+beide Formen und unterscheidet sie von „diese Hardware hat den Sensor nicht":
+gemeldet wird nur, was angelegt ist und trotzdem schweigt. Die GPU ist davon
+nicht betroffen — NVAPI braucht keinen eigenen Treiber.
+
+**Zwei Ursachen, zwei Meldungen.** Ein fehlender Super-I/O-Chip heißt auf einem
+Desktop „Treiber blockiert", auf einem Notebook dagegen „gibt es hier nicht":
+dort sitzt an seiner Stelle ein Embedded Controller mit herstellereigenem
+Protokoll, den auch ein geladener Treiber nicht aufschlösse. Unterschieden wird
+am Akku (`HasBattery`) — beides in eine Meldung zu ziehen hieße, dem Anwender
+eine Abhilfe zu versprechen, die es nicht gibt.
+
+### 8.6.1 Treiberfreie Ersatzquellen
+
+Alles, was ohne `WinRing0` erreichbar ist, wird auch ohne ihn geholt. Beide
+Quellen hängen an der bestehenden PDH-Abfrage und kosten deshalb keinen eigenen
+Takt:
+
+| Quelle | Zähler | ersetzt |
+|---|---|---|
+| `ThermalZoneSource` | `\Thermal Zone Information(*)\High Precision Temperature` | CPU-Temperatur |
+| `CounterSource` | `\Processor Information(_Total)\% Processor Performance` × Basistakt | CPU-Takt |
+
+Die Zonenwerte kommen in Zehntel-Kelvin; nicht belegte Zonen melden exakt
+273,2 K und fallen über eine Plausibilitätsgrenze (5 °C … 130 °C) heraus. Der
+Takt entsteht so, wie ihn auch der Task-Manager bildet: `% Processor
+Performance` ist ein Verhältnis zum Basistakt aus
+`HARDWARE\DESCRIPTION\System\CentralProcessor\0\~MHz`, kein Frequenzwert, und
+darf über 100 % liegen — sonst bliebe der Turbo unsichtbar.
+
+Beide Werte sind **schlechter** als die des Sensortreibers: eine Thermalzone
+misst die Umgebung des Prozessors statt seinen Die, der Takt ist ein Mittel über
+alle Kerne im Messintervall. Deshalb greifen sie nur als Rückfall, und die
+Herkunft geht als `CpuTempOrigin` beziehungsweise `ClockIsEstimated` mit an die
+Oberfläche: dort steht „(ACPI-Zone)" und „≈" am Wert. Ein Ersatzwert, der sich
+als Messwert ausgibt, wäre schlechter als gar keiner.
 
 Ein Lüfter mit 0 rpm ist kein Fehler: Grafikkarten schalten unterhalb einer
 Schwelltemperatur ganz ab. Die Oberfläche schreibt deshalb „steht" statt „0 rpm".
@@ -578,8 +611,8 @@ Angeheftete Zeilen stehen weiter ganz oben und überstehen jeden Filter.
   Grafikkarte und — sofern vorhanden — der Akku
 - Verlauf der Leistungsaufnahme über 5 Minuten, Achse selbstskalierend
 - Alle Temperatursensoren, nach Herkunft gruppiert (Prozessor, Grafikkarte,
-  Mainboard) — nebeneinander sähen die beiden „CPU"-Sensoren sonst nach zwei
-  Messungen derselben Sache aus
+  Mainboard, ACPI-Thermalzonen) — nebeneinander sähen die beiden „CPU"-Sensoren
+  sonst nach zwei Messungen derselben Sache aus
 - Lüfterliste mit Drehzahl und Ansteuerung
 - Alle Leistungssensoren einzeln
 - Akku im Einzelnen: Ladestand, Lade- oder Entladeleistung, Spannung,
@@ -754,8 +787,9 @@ tatsächlich verfügbar sind, ist hardwareabhängig und bestimmt das Overlay-Lay
 | WinRing0-Treiber wird von Antiviren- oder Anti-Cheat-Software beanstandet (bekanntes CVE-Umfeld) | Warnmeldungen, im Extremfall Blockade | Signierte Version aus LHM verwenden, Verhalten dokumentieren |
 | `% Processor Utility` auf manchen Systemen nicht vorhanden | CPU-Anzeige leer | Fallback auf `% Processor Time` |
 | `\GPU Engine` fehlt bei bestimmten Treiberkonstellationen | keine GPU-Werte | Erkennen und im UI ausgrauen; NVML als späterer Fallback |
-| LHM findet Lüftersensoren nicht (häufig bei Notebooks) | Lüfteranzeige fehlt | Feld ausblenden statt Null anzeigen |
-| Blockierter WinRing0-Treiber (Speicherintegrität, Sperrliste) — auf aktuellen Windows-11-Installationen **der Regelfall** | Keine CPU-Temperatur, kein CPU-Takt, keine Package Power, keine Sockeltemperatur, keine Gehäuselüfter. Der Super-I/O-Chip erscheint gar nicht erst in der Hardwareliste; die CPU-Sensoren existieren, melden aber konstant 0 | Erkennen (`CpuSensorsBlocked`, `BoardSensorsAvailable`) und als eine Meldung erklären, statt leere Felder oder 0 °C anzuzeigen. GPU-Werte kommen über NVAPI und bleiben vollständig |
+| LHM findet Lüftersensoren nicht (bei Notebooks der Regelfall — Embedded Controller statt Super-I/O) | Lüfteranzeige fehlt | Feld ausblenden statt Null anzeigen; die Ursache am Akku unterscheiden, statt sie dem Treiber anzulasten |
+| Blockierter WinRing0-Treiber (Speicherintegrität, Sperrliste) — auf aktuellen Windows-11-Installationen **der Regelfall** | Keine CPU-Temperatur, kein CPU-Takt, keine Package Power, keine Sockeltemperatur, keine Gehäuselüfter. Der Super-I/O-Chip erscheint gar nicht erst in der Hardwareliste; die CPU-Sensoren existieren, liefern aber nichts | Erkennen (`CpuSensorsBlocked`, `BoardSensorsAvailable`) und erklären, statt leere Felder oder 0 °C anzuzeigen. Temperatur und Takt ersatzweise treiberfrei holen (§8.6.1), als Ersatz gekennzeichnet. GPU-Werte kommen über NVAPI und bleiben vollständig |
+| Prozessorgrafik meldet keinen eigenen Speicher und keine „GPU Core"-Last | VRAM-Zeile leer, GPU-Kachel ausgegraut | Auf `D3D Shared Memory` und `D3D 3D` zurückfallen — aber nur, wenn kein dedizierter Wert vorliegt |
 | Prozess-Enumeration verursacht spürbare Last | Monitor wird selbst zum Problem | Nur bei geöffnetem Detailfenster, 2-Sekunden-Takt |
 | Elevation verhindert Interaktion mit unprivilegierten Fenstern (UIPI) | Drag-and-Drop-Einschränkungen | Für v1 irrelevant, bei Bedarf Dienst-Split nachziehen |
 

@@ -50,6 +50,46 @@ function optional(value, suffix, digits = 0) {
     return `${(digits === 0 ? nf0 : nf1).format(value)} ${suffix}`;
 }
 
+/**
+ * Die CPU-Temperatur, sofern nötig mit ihrer Herkunft. Ein Wert aus einer
+ * ACPI-Thermalzone misst die Umgebung des Prozessors, nicht seinen Die — er
+ * unkommentiert neben einem echten Sensorwert wäre eine falsche Auskunft.
+ */
+function cpuTempText(cpu) {
+    const text = optional(cpu.tempC, '°C');
+    if (!text) {
+        return null;
+    }
+    return cpu.tempOrigin === 'acpiZone' ? `${text} (ACPI-Zone)` : text;
+}
+
+/** Ein gerechneter Takt bekommt sein Ungefähr-Zeichen; ein gemessener nicht. */
+function cpuClockText(cpu) {
+    const text = optional(cpu.clockMhz, 'MHz');
+    if (!text) {
+        return null;
+    }
+    return cpu.clockEstimated ? `≈ ${text}` : text;
+}
+
+function cpuSubTooltip(cpu) {
+    const parts = [];
+    if (cpu.tempOrigin === 'acpiZone') {
+        parts.push(
+            'Die Temperatur stammt aus der ACPI-Thermalzone des Prozessors, nicht aus ihm selbst: die '
+            + 'Firmware misst in seiner Umgebung. Der Wert liegt niedriger als die Die-Temperatur und '
+            + 'folgt Lastspitzen mit Verzögerung.');
+    } else if (cpu.tempOrigin === 'socket') {
+        parts.push('Die Temperatur kommt vom Super-I/O-Chip des Mainboards und ist am Sockel gemessen, nicht am Die.');
+    }
+    if (cpu.clockEstimated) {
+        parts.push(
+            'Der Takt ist aus Basistakt und "% Processor Performance" gerechnet, weil der Sensortreiber '
+            + 'ihn nicht liefert — derselbe Weg, den auch der Task-Manager geht.');
+    }
+    return parts.join(' ');
+}
+
 function engineList(row) {
     return Object.entries(row.gpuEngines || {})
         .sort((a, b) => b[1] - a[1])
@@ -584,15 +624,16 @@ const elements = {
 function renderTiles(data) {
     elements.cpuPercent.textContent = nf1.format(data.cpu.percent);
     elements.cpuSub.textContent = [
-        optional(data.cpu.tempC, '°C'),
+        cpuTempText(data.cpu),
         // Nur zeigen, wenn beide Werte da sind — sonst steht die Sockeltemperatur
         // schon vorn als einziger Temperaturwert.
         data.cpu.socketTempC && data.cpu.tempC && data.cpu.socketTempC !== data.cpu.tempC
             ? `Sockel ${nf0.format(data.cpu.socketTempC)} °C`
             : null,
-        optional(data.cpu.clockMhz, 'MHz'),
+        cpuClockText(data.cpu),
         optional(data.cpu.powerW, 'W', 1),
     ].filter(Boolean).join('  ·  ') || 'keine Sensordaten';
+    elements.cpuSub.title = cpuSubTooltip(data.cpu);
 
     const system = data.system || {};
     elements.cpuThreads.textContent = system.threads > 0
@@ -663,27 +704,41 @@ function renderEngines(byEngineType) {
 
 // ---------- Meldungen ----------
 
-function noticesFor(diag) {
+function noticesFor(diag, cpu = {}) {
     const list = [];
     const add = (id, text) => list.push({ id, text });
 
-    if (diag.cpuSensorsBlocked || diag.boardSensorsMissing) {
-        // Beides hat dieselbe Ursache und wäre als zwei Meldungen nur doppelt
-        // gesagt. Aufgezählt wird, was konkret fehlt.
-        const missing = [];
-        if (diag.cpuSensorsBlocked) {
-            missing.push('CPU-Temperatur, -Takt und -Leistung');
-        }
-        if (diag.boardSensorsMissing) {
-            missing.push('Sockeltemperatur und Gehäuselüfter');
-        }
+    // Zwei getrennte Meldungen, weil es zwei verschiedene Ursachen sind: der
+    // Prozessor gibt seine Werte nur über einen Kernel-Treiber heraus, der
+    // Super-I/O-Chip existiert auf Notebooks überhaupt nicht in lesbarer Form.
+    if (diag.cpuSensorsBlocked) {
+        const substitutes = [
+            cpu.tempOrigin === 'acpiZone' ? 'die ACPI-Thermalzone des Prozessors' : null,
+            cpu.clockEstimated ? 'ein aus dem Leistungszähler gerechneter Takt' : null,
+        ].filter(Boolean);
+
+        const replacement = substitutes.length
+            ? ` Ersatzweise ${substitutes.length > 1 ? 'stehen' : 'steht'} hier ${substitutes.join(' und ')}`
+              + ' — ohne Treiber lesbar, dafür träger und gröber.'
+            : '';
 
         add('cpu-sensors',
-            `${missing.join(' sowie ')} sind nicht lesbar: der Sensor-Treiber WinRing0 wird von der ` +
-            'Speicherintegrität und der Sperrliste für verwundbare Treiber blockiert. Beide Werte ' +
-            'kommen aus dem Super-I/O-Chip des Mainboards, den nur dieser Treiber ansprechen kann. ' +
-            'Die GPU-Werte liest die Sensorbibliothek ohne eigenen Treiber aus und sind ' +
-            'davon nicht betroffen.');
+            'Temperatur, Takt und Leistungsaufnahme des Prozessors stehen in seinen Modellregistern, und ' +
+            'dorthin kommt allein der Kernel-Treiber WinRing0 — den die Speicherintegrität und die ' +
+            'Sperrliste für verwundbare Treiber blockieren.' + replacement +
+            ' Die GPU-Werte liest die Sensorbibliothek ohne eigenen Treiber und sind nicht betroffen.');
+    }
+
+    if (diag.boardSensorsMissing) {
+        add('board-sensors', diag.hasBattery
+            ? 'Sockeltemperatur und Gehäuselüfter meldet dieses Gerät nicht. In Notebooks hängen beide am ' +
+              'Embedded Controller, und den spricht jeder Hersteller anders an — die Sensorbibliothek ' +
+              'kennt dafür keinen allgemeinen Weg. Ein geladener Sensortreiber würde daran nichts ändern; ' +
+              'die Drehzahl zeigt nur das Werkzeug des Herstellers.'
+            : 'Sockeltemperatur und Gehäuselüfter sind nicht lesbar: sie kommen aus dem Super-I/O-Chip des ' +
+              'Mainboards, und der taucht ohne den Kernel-Treiber WinRing0 in der Hardwareliste gar nicht ' +
+              'erst auf. Blockiert wird er von der Speicherintegrität und der Sperrliste für verwundbare ' +
+              'Treiber.');
     }
     if (diag.gpuCountersMissing) {
         add('gpu-counters',
@@ -715,8 +770,8 @@ function noticesFor(diag) {
     return list;
 }
 
-function renderNotices(diag) {
-    const wanted = noticesFor(diag).filter(notice => !dismissedNotices.has(notice.id));
+function renderNotices(diag, cpu) {
+    const wanted = noticesFor(diag, cpu).filter(notice => !dismissedNotices.has(notice.id));
     const shown = [...elements.notices.children].map(node => node.dataset.id);
 
     // Nur neu aufbauen, wenn sich wirklich etwas geändert hat — sonst flackert
@@ -1969,7 +2024,17 @@ const TEMPERATURE_SOURCES = {
     cpu: 'Prozessor',
     gpu: 'Grafikkarte',
     board: 'Mainboard',
+    acpi: 'ACPI-Thermalzonen',
     other: 'Sonstige',
+};
+
+const TEMPERATURE_SOURCE_HINTS = {
+    cpu: 'Sensoren im Prozessor selbst. Sie messen am Die und schlagen bei Lastspitzen sofort aus.',
+    board: 'Sensoren des Super-I/O-Chips auf dem Mainboard. Der mit „CPU" bezeichnete misst am Sockel, '
+        + 'nicht im Prozessor — er liegt niedriger und reagiert träger.',
+    acpi: 'Zonen, die die Firmware für ihre eigene Kühlregelung führt. Sie kommen über ACPI und brauchen '
+        + 'keinen Sensortreiber, messen aber die Umgebung einer Komponente statt sie selbst. Die '
+        + 'Zonennamen vergibt der Hersteller; nur die eindeutigen sind hier übersetzt.',
 };
 
 function renderTemperatures(temperatures) {
@@ -1977,7 +2042,7 @@ function renderTemperatures(temperatures) {
 
     // Nach Herkunft gruppiert: „CPU" heißt am Mainboard etwas anderes als im
     // Prozessor, und nebeneinander sähe es nach zwei Messungen derselben Sache aus.
-    const order = ['cpu', 'gpu', 'board', 'other'];
+    const order = ['cpu', 'gpu', 'board', 'acpi', 'other'];
     const nodes = [];
 
     for (const source of order) {
@@ -1989,11 +2054,7 @@ function renderTemperatures(temperatures) {
         const heading = document.createElement('div');
         heading.className = 'temp-source';
         heading.textContent = TEMPERATURE_SOURCES[source];
-        heading.title = source === 'board'
-            ? 'Sensoren des Super-I/O-Chips auf dem Mainboard. Der mit „CPU" bezeichnete misst am Sockel, nicht im Prozessor — er liegt niedriger und reagiert träger.'
-            : source === 'cpu'
-                ? 'Sensoren im Prozessor selbst. Sie messen am Die und schlagen bei Lastspitzen sofort aus.'
-                : '';
+        heading.title = TEMPERATURE_SOURCE_HINTS[source] || '';
         nodes.push(heading);
 
         for (const entry of group) {
@@ -2686,37 +2747,79 @@ function capabilityEntries() {
             `Beim Öffnen meldete LibreHardwareMonitor: ${diag.sensorDriverError}`);
     }
 
+    const cpu = state.last?.cpu || {};
+
     if (diag.cpuSensorsBlocked) {
         add('warn', 'CPU-Temperatur, -Takt und -Leistung',
-            'Die Werte werden gemeldet, sind aber konstant 0 und werden deshalb ausgeblendet.',
+            'Die Sensoren sind angelegt, liefern aber nichts — je nach Windows-Fassung melden sie ' +
+            'konstant 0 oder gar keinen Wert. Beides wird ausgeblendet statt angezeigt.',
             'Der Sensortreiber WinRing0 wird von der Speicherintegrität und der Windows-Sperrliste ' +
             'für verwundbare Treiber blockiert. Er ist der einzige Weg zu den Modellregistern des ' +
-            'Prozessors. Abhilfe schafft nur, die Speicherintegrität abzuschalten — mit allem, was ' +
-            'daran hängt. Die GPU-Werte liest die Sensorbibliothek ohne eigenen Treiber aus ' +
-            'und sind nicht betroffen.');
+            'Prozessors, in denen Die-Temperatur, Takt und die Energiezähler stehen. Die GPU-Werte ' +
+            'liest die Sensorbibliothek ohne eigenen Treiber und sind nicht betroffen.');
     } else if (state.logAll) {
         add('ok', 'CPU-Sensoren', 'Temperatur, Takt und Leistungsaufnahme werden gelesen.', 'Über den Sensor-Treiber.');
     }
 
+    if (cpu.tempOrigin === 'acpiZone') {
+        add('info', 'CPU-Temperatur aus ACPI',
+            'Angezeigt wird die Thermalzone des Prozessors statt seiner Die-Temperatur.',
+            'Die Zone kommt aus der Firmware über den ACPI-Treiber von Windows und braucht keinen ' +
+            'eigenen Sensortreiber. Sie misst in der Umgebung des Prozessors: der Wert liegt niedriger ' +
+            'als die Die-Temperatur und folgt Lastspitzen mit Verzögerung.');
+    }
+
+    if (cpu.clockEstimated) {
+        add('info', 'CPU-Takt gerechnet',
+            'Der Takt ist aus Basistakt und „% Processor Performance" gerechnet, nicht gemessen.',
+            'Denselben Weg geht der Task-Manager. Er trifft den Mittelwert über alle Kerne im ' +
+            'Messintervall; einzelne Kerne können darüber oder darunter liegen.');
+    } else if (diag.clockEstimateAvailable === false && state.logAll) {
+        add('info', 'Taktschätzung', 'Steht als Rückfall nicht zur Verfügung.',
+            'Entweder fehlt der Zähler „% Processor Performance" oder der Basistakt ließ sich nicht lesen.');
+    }
+
     if (diag.boardSensorsMissing) {
-        add('warn', 'Mainboard-Sensoren',
+        add(diag.hasBattery ? 'info' : 'warn', 'Mainboard-Sensoren',
             'Sockeltemperatur und Gehäuselüfter fehlen.',
-            'Der Super-I/O-Chip des Mainboards taucht in der Hardwareliste nicht auf. Auch er ist nur ' +
-            'über den blockierten Kernel-Treiber erreichbar.');
+            diag.hasBattery
+                ? 'Dieses Gerät hat einen Akku, ist also ein Notebook. Dort sitzt statt eines '
+                + 'Super-I/O-Chips ein Embedded Controller, den jeder Hersteller anders anspricht — die '
+                + 'Sensorbibliothek kennt dafür keinen allgemeinen Weg. Das liegt nicht am gesperrten '
+                + 'Kernel-Treiber und ließe sich auch mit ihm nicht beheben.'
+                : 'Der Super-I/O-Chip des Mainboards taucht in der Hardwareliste nicht auf. Auch er ist '
+                + 'nur über den blockierten Kernel-Treiber erreichbar.');
+    }
+
+    if (diag.thermalZonesAvailable) {
+        if (state.logAll) {
+            add('ok', 'ACPI-Thermalzonen', 'Werden gelesen.',
+                'Der Zählersatz „Thermal Zone Information" liefert die Kühlzonen der Firmware — ohne '
+                + 'Kernel-Treiber und damit unabhängig von der Speicherintegrität.');
+        }
+    } else {
+        add('info', 'ACPI-Thermalzonen', 'Der Zählersatz „Thermal Zone Information" fehlt.',
+            'Er ist der treiberfreie Rückfall für Temperaturen. Ohne ihn bleibt nur, was die '
+            + 'Sensorbibliothek meldet.');
     }
 
     if (!(energy.temperatures || []).length) {
         add('warn', 'Temperatursensoren', 'Es wird kein einziger Temperaturwert gemeldet.',
             'Ohne geladenen Sensor-Treiber meldet weder Prozessor noch Mainboard etwas; Grafikkarten ' +
-            'melden ihre Temperatur normalerweise auch ohne ihn.');
+            'melden ihre Temperatur normalerweise auch ohne ihn, und die ACPI-Thermalzonen kämen ganz ' +
+            'ohne Treiber aus — wenn dieses System sie führt.');
     } else if (state.logAll) {
         add('ok', 'Temperatursensoren', `${(energy.temperatures || []).length} Sensoren werden gelesen.`, '');
     }
 
     if (!(energy.fans || []).length) {
         add('info', 'Lüfter', 'Es werden keine Drehzahlen gemeldet.',
-            'Gehäuselüfter hängen am Super-I/O-Chip. Notebooks geben ihre Drehzahlen oft überhaupt ' +
-            'nicht über die Sensorschnittstelle heraus, sondern nur an die Software des Herstellers.');
+            diag.hasBattery
+                ? 'Notebooks führen ihre Lüfter am Embedded Controller und geben die Drehzahl nicht '
+                + 'über eine allgemeine Schnittstelle heraus, sondern nur an das Werkzeug des '
+                + 'Herstellers. Windows selbst kennt sie ebenso wenig.'
+                : 'Gehäuselüfter hängen am Super-I/O-Chip des Mainboards; ohne geladenen Sensortreiber '
+                + 'ist er nicht erreichbar.');
     } else if (state.logAll) {
         add('ok', 'Lüfter', `${(energy.fans || []).length} Lüfter werden gelesen.`, '');
     }
@@ -3129,7 +3232,7 @@ if (host) {
         state.last = data;
         state.diag = data.diag || {};
         renderTiles(data);
-        renderNotices(state.diag);
+        renderNotices(state.diag, data.cpu);
         state.history = data.history;
 
         // Das Protokoll kommt nur mit, wenn es sich geändert hat.

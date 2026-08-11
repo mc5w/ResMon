@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.Runtime.Versioning;
+using ResMon.Core;
+using ResMon.Core.Config;
 using ResMon.Core.Inventory;
 using ResMon.Core.Model;
 using ResMon.Core.Native;
@@ -28,6 +30,7 @@ internal static class Program
             "processes" => DumpProcesses(Iterations(args, 3)),
             "connections" => DumpConnections(),
             "energy" => DumpEnergy(Iterations(args, 3)),
+            "snapshot" => DumpSnapshot(Iterations(args, 3)),
             "paths" => DumpPaths(),
             "system" => DumpSystem(),
             _ => Help(),
@@ -45,6 +48,7 @@ internal static class Program
               processes [n]      Top-15-Prozesse nach CPU ausgeben
               connections        Offene TCP- und UDP-Verbindungen mit besitzendem Prozess
               energy [n]         Leistungsaufnahme, Lüfterdrehzahlen und Akku
+              snapshot [n]       Was der Collector ausliefert, samt Herkunft jedes CPU-Werts
               system             Systemübersicht: OS, CPU, GPU, RAM, Mainboard, Datenträger
               paths              Prüfen, welche PDH-Zählerpfade dieses System kennt
 
@@ -272,9 +276,26 @@ internal static class Program
             return 2;
         }
 
+        // Die treiberfreien Quellen hängen an PDH und laufen deshalb in einer
+        // eigenen Abfrage neben der Sensorbibliothek her.
+        using var query = new PdhQuery();
+        var zones = new ThermalZoneSource(query);
+        var counters = new CounterSource(query);
+        Console.WriteLine($"ACPI-Thermalzonen verfügbar: {zones.Available}");
+        Console.WriteLine($"Taktschätzung verfügbar:     {counters.ClockEstimateAvailable}");
+
         for (int i = 0; i <= iterations; i++)
         {
             HardwareReading reading = hardware.Update();
+            query.Collect();
+
+            ThermalZoneReading zoneReading = zones.Read();
+            Console.WriteLine();
+            Console.WriteLine($"ACPI-Thermalzonen ({zoneReading.Zones.Count})");
+            foreach (TemperatureSample zone in zoneReading.Zones)
+                Console.WriteLine($"    {zone.Hardware,-28} {zone.Name,-26} {zone.Celsius,8:F1} °C");
+            Console.WriteLine($"    davon als CPU-Ersatz:    {Format(zoneReading.CpuZoneTempC, "°C")}");
+            Console.WriteLine($"    Takt (geschätzt):        {Format(counters.Read().ClockMhz, "MHz")}");
 
             Console.WriteLine();
             Console.WriteLine($"Leistungssensoren ({reading.Rails.Count})");
@@ -309,6 +330,65 @@ internal static class Program
             Thread.Sleep(2000);
         }
 
+        return 0;
+    }
+
+    /// <summary>
+    /// Der Weg durch den ganzen Erfassungsteil: nicht was die Quellen können,
+    /// sondern was am Ende in der Kachel steht — und aus welcher Quelle. Damit
+    /// lässt sich auf fremder Hardware in einem Aufruf klären, ob die Rückfälle
+    /// greifen.
+    /// </summary>
+    private static int DumpSnapshot(int iterations)
+    {
+        using var collector = new Collector(new AppSettings());
+        var done = new CountdownEvent(iterations);
+        bool described = false;
+
+        collector.SnapshotReady += snapshot =>
+        {
+            // Erst nach dem ersten Takt: Ob die CPU-Sensoren schweigen, steht
+            // fest, sobald die Sensorbibliothek einmal gelesen wurde.
+            if (!described)
+            {
+                described = true;
+                Console.WriteLine($"Sensortreiber:         {collector.HardwareError ?? "geöffnet"}");
+                Console.WriteLine($"CPU-Sensoren gesperrt: {collector.CpuSensorsBlocked}");
+                Console.WriteLine($"Mainboard-Sensoren:    {(collector.BoardSensorsMissing ? "fehlen" : "vorhanden")}");
+                Console.WriteLine($"Akku vorhanden:        {collector.HasBattery}");
+                Console.WriteLine($"ACPI-Thermalzonen:     {collector.ThermalZonesAvailable}");
+                Console.WriteLine($"Taktschätzung:         {collector.ClockEstimateAvailable}");
+            }
+
+            CpuMetrics cpu = snapshot.Cpu;
+            string origin = cpu.TempOrigin switch
+            {
+                CpuTempOrigin.Die => "Die-Sensor des Prozessors",
+                CpuTempOrigin.Socket => "Sockel, vom Mainboard",
+                CpuTempOrigin.AcpiZone => "ACPI-Thermalzone (Ersatz)",
+                _ => "keine Quelle",
+            };
+
+            Console.WriteLine();
+            Console.WriteLine($"CPU   {cpu.TotalPercent,6:F1} %   {Format(cpu.PackageTempC, "°C")}   " +
+                              $"{(cpu.ClockIsEstimated ? "≈" : " ")}{Format(cpu.ClockMhz, "MHz")}   {Format(cpu.PackagePowerW, "W")}");
+            Console.WriteLine($"    Temperatur aus:  {origin}");
+            Console.WriteLine($"    Takt:            {(cpu.ClockIsEstimated ? "aus dem Leistungszähler gerechnet" : "gemessen")}");
+            Console.WriteLine($"    Temperaturen:    {snapshot.Energy.Temperatures.Count} " +
+                              $"({string.Join(", ", snapshot.Energy.Temperatures.GroupBy(t => t.Source).Select(g => $"{g.Key}: {g.Count()}"))})");
+            Console.WriteLine($"GPU   {snapshot.Gpu.TotalPercent,6:F1} %   {Format(snapshot.Gpu.TempC, "°C")}   " +
+                              $"Speicher {snapshot.Gpu.MemUsedBytes / 1048576} / {snapshot.Gpu.MemTotalBytes / 1048576} MB");
+
+            if (!done.IsSet)
+                done.Signal();
+        };
+
+        collector.Start();
+
+        if (!done.Wait(TimeSpan.FromSeconds(10 + (iterations * 2))))
+            Console.Error.WriteLine("Zeitüberschreitung: der Collector hat nicht genug Takte geliefert.");
+
+        collector.Stop();
         return 0;
     }
 
