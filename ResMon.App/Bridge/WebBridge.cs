@@ -5,6 +5,7 @@ using ResMon.Core.Diagnostics;
 using ResMon.Core.Inventory;
 using ResMon.Core.Model;
 using ResMon.Core.Processes;
+using ResMon.Core.Storage;
 
 namespace ResMon.App.Bridge;
 
@@ -59,6 +60,24 @@ public sealed class WebCommand
     public string? Key { get; set; }
 
     public bool? On { get; set; }
+
+    /// <summary>
+    /// Laufwerkswurzel für den Ordner-Scan, etwa <c>C:\</c>. Der Host nimmt nur
+    /// Wurzeln an; einen beliebigen Pfad soll die Seite ihm nicht zum Durchlaufen
+    /// geben können. Bewusst ein eigenes Feld und nicht <see cref="Name"/>: dies
+    /// ist der einzige Wert von der Seite, der geprüft wird, und ein geprüfter
+    /// Wert soll sich keinen Platz mit einem ungeprüften teilen.
+    /// </summary>
+    public string? Path { get; set; }
+
+    /// <summary>
+    /// Kennung des Laufs, zu dem sich <see cref="Node"/> zählt. Ein Nachschlag
+    /// aus einem überholten Scan zeigte sonst in einen anderen Baum.
+    /// </summary>
+    public int? Scan { get; set; }
+
+    /// <summary>Index eines Knotens im Ergebnis des benannten Laufs.</summary>
+    public int? Node { get; set; }
 }
 
 /// <summary>
@@ -452,6 +471,7 @@ public static class WebBridge
                 {
                     name = volume.Name,
                     label = volume.Label,
+                    driveType = volume.Type,
                     fileSystem = volume.FileSystem,
                     totalBytes = volume.TotalBytes,
                     freeBytes = volume.FreeBytes,
@@ -463,6 +483,101 @@ public static class WebBridge
 
         return JsonSerializer.Serialize(payload, Options);
     }
+
+    /// <summary>
+    /// Das Ergebnis eines Ordner-Scans, auf einen Auszug beschnitten. Ein eigener
+    /// Nachrichtentyp und kein Anhängsel der Messnutzlast: die geht im
+    /// Sekundentakt und ist darauf gebaut, auszulassen was sich nicht geändert
+    /// hat — ein Scan ist stoßweise, unverwandt, und bis zu eine Sekunde Verzug
+    /// auf den Übergang „fertig" fühlte sich kaputt an.
+    /// </summary>
+    public static string BuildScanPayload(FolderScanResult result, int scanId)
+    {
+        var payload = new
+        {
+            type = "scan",
+            phase = "done",
+            scanId,
+            root = result.Root,
+            cancelled = result.Cancelled,
+            totalBytes = result.TotalBytes,
+            volumeTotalBytes = result.VolumeTotalBytes,
+            volumeUsedBytes = result.VolumeTotalBytes - result.VolumeFreeBytes,
+            files = result.TotalFileCount,
+            dirs = result.DirectoryCount,
+            denied = result.DeniedFolders,
+            reparse = result.ReparsePoints,
+            cloudBytes = result.CloudBytes,
+            seconds = Round(result.Duration.TotalSeconds),
+            nodes = result.Prune().Select(ScanNode).ToArray(),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>Die nachgeforderten Kinder eines Knotens.</summary>
+    public static string BuildScanChildrenPayload(FolderScanResult result, int scanId, int parent)
+    {
+        var payload = new
+        {
+            type = "scan",
+            phase = "children",
+            scanId,
+            parent,
+            nodes = result.ChildrenOf(parent).Select(ScanNode).ToArray(),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>Zwischenstand eines laufenden Scans.</summary>
+    public static string BuildScanProgressPayload(
+        int scanId, int dirs, int files, long bytes, string current)
+    {
+        var payload = new
+        {
+            type = "scan",
+            phase = "running",
+            scanId,
+            dirs,
+            files,
+            bytes,
+            current,
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>Ein Scan, der nicht mit einem Baum endet — Fehler oder abgelehnt.</summary>
+    public static string BuildScanStatusPayload(int scanId, string phase, string? message)
+    {
+        var payload = new { type = "scan", phase, scanId, message };
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>
+    /// Ein Knoten auf der Leitung. Kurze Schlüssel wie bei den Prozessen
+    /// (<c>ws</c>, <c>priv</c>, <c>rx</c>): bei knapp zweitausend Knoten macht
+    /// der Name jedes Feldes den Unterschied zwischen 150 und 300 KB. Felder mit
+    /// dem Wert null fallen über <see cref="Options"/> ganz weg — und bei einem
+    /// Baum aus Ordnern ohne Großdateien ist das die Mehrzahl.
+    /// </summary>
+    private static object ScanNode(FolderSlice slice) => new
+    {
+        i = slice.Id,
+        p = slice.Parent,
+        n = slice.Name,
+        b = slice.TotalBytes,
+        o = NonZero(slice.OwnBytes),
+        k = NonZero(slice.ChildCount),
+        c = NonZero(slice.TotalFileCount),
+        f = slice.IsFile ? true : (bool?)null,
+        g = slice.Flags == FolderFlags.None ? null : (FolderFlags?)slice.Flags,
+    };
+
+    private static long? NonZero(long value) => value != 0 ? value : null;
+
+    private static int? NonZero(int value) => value != 0 ? value : null;
 
     private static double[] Series(AggregateSample[] history, int points, Func<AggregateSample, double> selector, int digits = 1)
     {

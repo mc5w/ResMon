@@ -25,6 +25,6 @@ packages/
 .idea/
 .vscode/
 
-## Laufzeitartefakte dieser Anwendung
+## Artefakte
 WebView2/
 *.WebView2/

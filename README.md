@@ -46,7 +46,7 @@ Tray-Icon. Bedienung:
 - **Details** — Prozessfenster öffnen (erst dann laufen Prozess-Enumeration und ETW)
 - **Tray-Menü** — Deckkraft, sichtbare Zeilen, Klick-Durchlässigkeit, Autostart, Beenden
 
-Das Detailfenster hat sechs Reiter:
+Das Detailfenster hat sieben Reiter:
 
 | Reiter | Inhalt |
 |---|---|
@@ -54,8 +54,31 @@ Das Detailfenster hat sechs Reiter:
 | **Energie** | Leistungsaufnahme, Temperaturen, Lüfter, Akku und der Energieeinfluss je Prozess |
 | **Verbindungen** | Übersicht der offenen Ports und darunter die vollständige TCP/UDP-Tabelle |
 | **System** | Betriebssystem, Laufzeit, CPU samt Cache-Ebenen, Grafik, Arbeitsspeicher, Mainboard, Geräte und Datenträger |
+| **Speicher** | Welche Ordner eine Partition füllen — sortierter Baum und Kachelkarte nebeneinander |
 | **Logs** | Was gerade *nicht* ausgelesen werden kann und warum — Zählersätze, Sensortreiber, gefangene Fehler |
 | **Einstellungen** | Farbschema, Deckkraft und Größe des Overlays, sichtbare Zeilen, Reihen des Diagramms |
+
+### Reiter „Speicher"
+
+Der System-Reiter sagt, *dass* eine Partition eng wird; dieser sagt, **wo** der
+Platz liegt. Der Durchlauf läuft nur auf Knopfdruck — er ist die einzige
+Datenquelle der Anwendung ohne Takt. Gemessen auf einem vollen `C:` mit 1,04 Mio.
+Dateien und 291 000 Ordnern: rund 7 Sekunden warm, rund 31 Sekunden kalt auf einer
+NVMe. Auf einer Festplatte dauert es ein Vielfaches, weshalb der Grad der
+Parallelität dort auf zwei Threads sinkt.
+
+Links der Baum, je Ebene nach Größe sortiert, mit Anteilsbalken; rechts eine
+Kachelkarte, deren Flächen den Größen entsprechen. Die Auswahl ist gekoppelt.
+Klick in die Karte markiert die Zeile, Doppelklick zoomt hinein, die Brotkrumen
+führen zurück. Rechtsklick auf Zeile oder Kachel bietet **Im Explorer öffnen** und
+**Pfad kopieren** — gelöscht wird bewusst nicht aus der Anwendung heraus, sie läuft
+erhöht, und ein Fehlgriff träfe auch Systemordner ohne Papierkorb.
+
+Dateien ab 16 MB bekommen einen eigenen Eintrag; `hiberfil.sys` und `pagefile.sys`
+stehen also mit in der Liste. Alles Kleinere zählt in die Summe seines Ordners.
+
+Zu lesen ist das Ergebnis mit den Vorbehalten, die unter der Leiste stehen: siehe
+den nächsten Abschnitt.
 
 Bedienung der Tabellen:
 
@@ -99,6 +122,11 @@ ResMon.Probe\bin\x64\Release\net9.0\ResMon.Probe.exe sensors
 | `gpu [n]` | Rohe GPU-Engine-Instanzen mit PID und Engine-Typ |
 | `processes [n]` | Top-15-Prozesse nach CPU inklusive Dienstauflösung |
 | `paths` | Welche der benötigten PDH-Zählerpfade dieses System kennt |
+| `scan [Laufwerk]` | Ordnerbelegung messen: Dauer, Einträge/s, Zuweisungen, Größe der Nutzlast und die 30 größten Pfade |
+
+`scan` ist zugleich die Messbank für den Reiter „Speicher" — Laufzeit,
+Speicherbedarf und die Wirkung der Schwellwerte lassen sich damit prüfen, ohne die
+Oberfläche zu starten.
 
 Für die Arbeit an der Oberfläche ohne Elevation lässt sich `wwwroot` als
 statische Seite ausliefern, etwa mit
@@ -134,6 +162,43 @@ Zwei weitere Annahmen aus WMI haben sich als unbrauchbar erwiesen:
 32-Bit-Feld, das ab 4 GB VRAM den gedeckelten Wert 4293918720 meldet; Werte nahe
 der Grenze werden verworfen.
 
+## Was der Ordner-Scan nicht messen kann
+
+Der Reiter „Speicher" meldet die **logische** Größe der Dateien, nicht ihre
+Belegung auf dem Datenträger — dieselbe Zahl, die auch der Explorer unter „Größe"
+zeigt, also gegenprüfbar. Fünf Dinge gehen dabei auseinander:
+
+1. **Harte Verknüpfungen zählen doppelt.** Der Komponentenspeicher `WinSxS` teilt
+   sich seine Cluster größtenteils mit `System32`; beide Namen zeigen auf dieselben
+   Daten, und der Scan zählt sie unter jedem. Auf einem gewöhnlichen Windows sind
+   das 5–15 GB zu viel. Es zu erkennen bräuchte den Dateiindex **jeder** Datei,
+   also ein `CreateFile` je Eintrag — das vervielfachte die Laufzeit. Der Explorer
+   rechnet übrigens genauso.
+2. **Komprimierte und dünn besetzte Dateien** belegen weniger, als hier steht. Die
+   betroffenen Ordner tragen ein Zeichen.
+3. **Cloud-Platzhalter** (OneDrive) melden die Größe der vollständigen Datei,
+   obwohl auf dem Datenträger fast nichts davon liegt. Ihr Anteil wird gesondert
+   ausgewiesen.
+4. **Nicht lesbare Ordner** fehlen in der Summe. Die Anzahl steht in der Kopfzeile,
+   die Ursache im Reiter „Logs".
+5. **Abzweigungen werden nicht verfolgt** — `C:\Users\All Users` zeigt auf
+   `C:\ProgramData`, eingehängte Volumes gehören zu einer anderen Partition. Sie
+   erscheinen mit 0 Byte und einem Zeichen.
+
+Die Summe weicht deshalb von der Belegung ab, die Windows meldet, und die
+Oberfläche nennt die Differenz ausdrücklich. Sie ist eine Auskunft, kein Fehler:
+harte Verknüpfungen treiben sie nach oben, während Cluster-Verschnitt, `$MFT`,
+`$LogFile`, die Verzeichnisindizes, verweigerte Teilbäume und vor allem
+**Schattenkopien** in `System Volume Information` fehlen. Letztere sind auf einer
+nahezu vollen Partition regelmäßig unter den größten Posten und lassen sich
+keinem Ordner zurechnen; `vssadmin list shadowstorage` nennt ihren Umfang.
+
+Ausdrücklich nicht getan: `SeBackupPrivilege` für die Dauer des Scans zu
+aktivieren. Es würde fast alle verweigerten Pfade öffnen — der Prozess läuft
+erhöht, das Recht liegt schlafend vor —, ist aber eine prozessweite Änderung am
+Token ohne Thread-Begrenzung. Ein Überwachungswerkzeug, das sich still
+Sicherungsrechte erteilt, ist eine Überraschung.
+
 ## Abweichung von DESIGN.md §12
 
 Das Command-Set der Bridge enthält entgegen §12 ein Kommando zum **Beenden von
@@ -145,6 +210,14 @@ Sperre für die Prozesse, deren Ende Windows zum Absturz bringt (`smss.exe`,
 Hinzugekommen ist außerdem `requestSystemInfo`: die Systemübersicht wird genau
 einmal gesendet, und die Oberfläche kann sie nachfordern, falls sie die Nachricht
 verpasst hat.
+
+Für den Reiter „Speicher" sind fünf weitere Kommandos hinzugekommen —
+`startFolderScan`, `cancelFolderScan`, `expandFolder`, `openFolder` und
+`copyFolderPath`. `startFolderScan` ist das einzige, das einen Pfad
+entgegennimmt, und der Host nimmt ausschließlich Laufwerkswurzeln an, die er gegen
+`DriveInfo.GetDrives()` prüft. Alles Weitere läuft über ganzzahlige Kennungen in
+einen Baum, den der Host selbst gebaut hat: die Oberfläche kann ihn also nicht
+dazu bringen, einen beliebigen Pfad abzulaufen.
 
 ## CPU-Temperatur und Speicherintegrität
 

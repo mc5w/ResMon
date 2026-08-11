@@ -586,6 +586,18 @@ const elements = {
     systemDrives: document.getElementById('system-drives'),
     systemEmpty: document.getElementById('system-empty'),
     refreshDevices: document.getElementById('refresh-devices'),
+    storageDrive: document.getElementById('storage-drive'),
+    storageStart: document.getElementById('storage-start'),
+    storageCancel: document.getElementById('storage-cancel'),
+    storageFiles: document.getElementById('storage-files'),
+    storageStatus: document.getElementById('storage-status'),
+    storageNote: document.getElementById('storage-note'),
+    storageEmpty: document.getElementById('storage-empty'),
+    storageHead: document.getElementById('storage-head'),
+    storageTable: document.getElementById('storage-table'),
+    storageCrumbs: document.getElementById('storage-crumbs'),
+    storageCanvas: document.getElementById('storage-canvas'),
+    storageTip: document.getElementById('storage-tip'),
     tempList: document.getElementById('temp-list'),
     tempEmpty: document.getElementById('temp-empty'),
     portsList: document.getElementById('ports-list'),
@@ -1709,6 +1721,28 @@ elements.tbody.addEventListener('contextmenu', event => {
     // Der Host fragt vor dem Beenden noch einmal nach.
     entries.push([`„${row.name}“ beenden …`, () => send('killProcess', { pid, name: row.name }), 'danger']);
 
+    showRowMenu(event, entries);
+});
+
+/**
+ * Marke für die Dauer einer Auslösung: das Menü wurde gerade geöffnet. Der
+ * Listener am Dokument läuft danach und dürfte es sonst sofort wieder schließen.
+ */
+let menuOpening = false;
+
+/**
+ * Baut das Kontextmenü und stellt es an den Zeiger. Getrennt von der
+ * Prozesstabelle, weil der Reiter „Speicher" dasselbe Menü füllt — mit anderen
+ * Einträgen, aber demselben Aussehen und derselben Randbehandlung.
+ */
+function showRowMenu(event, entries) {
+    if (!entries.length) {
+        return;
+    }
+
+    menuOpening = true;
+    setTimeout(() => { menuOpening = false; }, 0);
+
     rowMenu.replaceChildren(...entries.map(([label, action, variant]) => {
         const button = document.createElement('button');
         button.type = 'button';
@@ -1730,11 +1764,15 @@ elements.tbody.addEventListener('contextmenu', event => {
     const height = rowMenu.offsetHeight;
     rowMenu.style.left = `${Math.min(event.clientX, window.innerWidth - width - 8)}px`;
     rowMenu.style.top = `${Math.min(event.clientY, window.innerHeight - height - 8)}px`;
-});
+}
 
 document.addEventListener('click', closeRowMenu);
-document.addEventListener('contextmenu', event => {
-    if (!event.target.closest('#processes tbody')) {
+document.addEventListener('contextmenu', () => {
+    // Nicht am Ziel entlangprüfen, ob es zu einer Tabelle mit Menü gehört: der
+    // Reiter „Speicher" wählt beim Rechtsklick die Zeile aus und zeichnet die
+    // Tabelle dabei neu. Das Ziel hängt dann nicht mehr im Dokument, closest()
+    // liefert null, und das gerade geöffnete Menü ginge sofort wieder zu.
+    if (!menuOpening) {
         closeRowMenu();
     }
 });
@@ -1827,6 +1865,8 @@ function renderSystemInfo(data) {
         card.append(list);
         return card;
     }));
+
+    fillStorageDrives(data.drives);
 
     elements.systemDrives.replaceChildren(...(data.drives || []).map(drive => {
         const card = document.createElement('section');
@@ -3138,6 +3178,15 @@ for (const tab of document.querySelectorAll('.tab')) {
             renderConnections();
         } else if (state.view === 'logs') {
             renderLogs();
+        } else if (state.view === 'storage') {
+            // Die Laufwerksauswahl kommt aus der Systemübersicht; ohne sie gäbe
+            // es nichts zu wählen.
+            if (!elements.storageDrive.options.length) {
+                send('requestSystemInfo');
+            }
+            renderStorageTable();
+            renderCrumbs();
+            drawTreemap();
         } else if (state.view === 'system' && !state.systemLoaded) {
             // Die Übersicht wird genau einmal gesendet. Ist sie nicht angekommen
             // — etwa weil die Seite beim Senden noch lud —, hier nachfragen.
@@ -3206,6 +3255,1034 @@ renderEnergyHead();
 // und deckt den Fall ab, dass die Seite beim Senden noch nicht stand.
 send('requestSettings');
 
+// ---------- Speicher ----------
+
+// Der Reiter „Speicher" (DESIGN.md §13.5). Der Host läuft die Partition auf
+// Knopfdruck ab und schickt einen beschnittenen Auszug; Sortieren, Aufklappen und
+// die Kachelkarte passieren vollständig hier.
+
+const FOLDER_COLUMNS = [
+    {
+        key: 'name', label: 'Name', align: 'left',
+        help: 'Ordner und — sofern eingeschaltet — Dateien ab 16 MB. Jede Ebene ist für sich sortiert.',
+    },
+    {
+        key: 'size', label: 'Größe', align: 'right',
+        help: 'Die logische Größe aller enthaltenen Dateien, nicht ihre Belegung auf dem Datenträger. '
+            + 'Bei komprimierten, dünn besetzten und in der Cloud liegenden Dateien geht beides auseinander; '
+            + 'harte Verknüpfungen zählen unter jedem ihrer Namen mit.',
+    },
+    {
+        key: 'share', label: 'Anteil', align: 'left',
+        help: 'Anteil an der gesamten durchsuchten Menge — nicht am übergeordneten Ordner. '
+            + 'Sonst stünde in jedem Zweig 100 % und die Zahl sagte nichts.',
+    },
+    {
+        key: 'files', label: 'Dateien', align: 'right',
+        help: 'Anzahl Dateien einschließlich aller Unterordner.',
+    },
+    {
+        key: 'entries', label: 'Einträge', align: 'right',
+        help: 'Unterordner und Großdateien unmittelbar in diesem Ordner.',
+    },
+];
+
+const storage = {
+    scanId: 0,
+    running: false,
+    root: 0,
+    total: 0,
+    summary: null,
+    nodes: new Map(),
+    children: new Map(),
+    expanded: new Set(),
+    pending: new Set(),
+    selected: null,
+    mapRoot: 0,
+    rects: [],
+    hover: null,
+    sort: { key: 'size', asc: false },
+};
+
+const MAX_STORAGE_ROWS = 800;
+
+function knownChildren(id) {
+    return storage.children.get(id) || [];
+}
+
+/**
+ * Was in diesem Ordner steckt, aber keine eigene Zeile hat: die kleinen Dateien
+ * unmittelbar darin plus die Kinder, die der Host weggelassen hat. Abgeleitet
+ * statt mitgeschickt — nach einem Nachschlag stimmte ein mitgegebener Wert nicht
+ * mehr.
+ */
+function storageRest(node) {
+    let sum = 0;
+    for (const id of knownChildren(node.id)) {
+        sum += storage.nodes.get(id)?.bytes || 0;
+    }
+    return Math.max(0, node.bytes - sum);
+}
+
+function storageExpandable(node) {
+    return !node.isFile && knownChildren(node.id).length < node.childCount;
+}
+
+function ingestStorageNodes(list) {
+    for (const raw of list || []) {
+        const node = {
+            id: raw.i,
+            parent: raw.p ?? -1,
+            name: raw.n,
+            bytes: raw.b || 0,
+            own: raw.o || 0,
+            childCount: raw.k || 0,
+            files: raw.c || 0,
+            isFile: raw.f === true,
+            flags: raw.g || '',
+        };
+
+        storage.nodes.set(node.id, node);
+        if (node.parent < 0) {
+            continue;
+        }
+
+        const siblings = storage.children.get(node.parent);
+        if (!siblings) {
+            storage.children.set(node.parent, [node.id]);
+        } else if (!siblings.includes(node.id)) {
+            siblings.push(node.id);
+        }
+    }
+}
+
+function storageSortValue(node, key) {
+    switch (key) {
+        case 'name': return node.name.toLowerCase();
+        case 'files': return node.files;
+        case 'entries': return node.childCount;
+        default: return node.bytes;
+    }
+}
+
+function sortedStorageChildren(id) {
+    const showFiles = elements.storageFiles.checked;
+    const ids = knownChildren(id).filter(child => {
+        const node = storage.nodes.get(child);
+        return node && (showFiles || !node.isFile);
+    });
+
+    const direction = storage.sort.asc ? 1 : -1;
+    ids.sort((left, right) => {
+        const a = storageSortValue(storage.nodes.get(left), storage.sort.key);
+        const b = storageSortValue(storage.nodes.get(right), storage.sort.key);
+        if (typeof a === 'string') {
+            return direction * a.localeCompare(b, 'de');
+        }
+        return direction * (a - b);
+    });
+
+    return ids;
+}
+
+/** Der aufgeklappte Baum als flache Zeilenliste. */
+function flattenStorage() {
+    const rows = [];
+
+    const walk = (id, depth) => {
+        const node = storage.nodes.get(id);
+        if (!node || rows.length >= MAX_STORAGE_ROWS) {
+            return;
+        }
+
+        rows.push({ node, depth });
+        if (node.isFile || !storage.expanded.has(id)) {
+            return;
+        }
+
+        for (const child of sortedStorageChildren(id)) {
+            walk(child, depth + 1);
+        }
+
+        // Der Rest bekommt eine eigene Zeile, damit die Anteile aufgehen. Ohne
+        // sie sähe ein Ordner aus, als bestünde er nur aus dem, was gerade
+        // sichtbar ist.
+        const rest = storageRest(node);
+        if (rest > 0 && rows.length < MAX_STORAGE_ROWS) {
+            rows.push({ node, depth: depth + 1, rest });
+        }
+    };
+
+    walk(storage.root, 0);
+    return rows;
+}
+
+function storagePath(id) {
+    const parts = [];
+    for (let cursor = id; cursor >= 0;) {
+        const node = storage.nodes.get(cursor);
+        if (!node) {
+            break;
+        }
+        parts.unshift(node.name);
+        cursor = node.parent;
+    }
+
+    if (!parts.length) {
+        return '';
+    }
+
+    // Ohne Startwert beginnt reduce beim Wurzelsegment. Mit einem leeren
+    // Startwert stünde ein Trennstrich davor — „\C:\Users" statt „C:\Users".
+    return parts.reduce((path, part) => (path.endsWith('\\') ? path + part : `${path}\\${part}`));
+}
+
+const FOLDER_FLAG_HINTS = {
+    reparse: 'Enthält Abzweigungen (Junctions oder eingehängte Volumes), die nicht verfolgt wurden — ihr Inhalt zählt anderswo.',
+    denied: 'Windows hat den Inhalt nicht vollständig herausgegeben. Die Summe ist zu klein.',
+    compressed: 'Enthält komprimierte oder dünn besetzte Dateien. Auf dem Datenträger liegt weniger als hier steht.',
+    cloud: 'Enthält Cloud-Platzhalter. Die Größe ist die der vollständigen Datei, nicht das, was hier liegt.',
+};
+
+function renderStorageHead() {
+    elements.storageHead.replaceChildren(...FOLDER_COLUMNS.map((column, index) => {
+        const th = document.createElement('th');
+        th.textContent = column.label;
+        th.className = column.align === 'right' ? 'num' : '';
+        th.title = `${column.help}\n\nKlicken sortiert, die rechte Kante ändert die Breite.`;
+        if (storage.sort.key === column.key) {
+            th.classList.add(storage.sort.asc ? 'sorted-asc' : 'sorted-desc');
+        }
+
+        if (index < FOLDER_COLUMNS.length - 1) {
+            addResizeHandle(th, 'storage', FOLDER_COLUMNS, column, applyStorageWidths);
+        }
+
+        th.addEventListener('click', () => {
+            if (storage.sort.key === column.key) {
+                storage.sort.asc = !storage.sort.asc;
+            } else {
+                storage.sort = { key: column.key, asc: column.key === 'name' };
+            }
+            renderStorageHead();
+            renderStorageTable();
+            drawTreemap();
+        });
+
+        return th;
+    }));
+
+    applyStorageWidths();
+}
+
+function applyStorageWidths() {
+    applyColumnWidths(elements.storageTable, 'storage', FOLDER_COLUMNS);
+}
+
+function renderStorageTable() {
+    const tbody = elements.storageTable.tBodies[0];
+    elements.storageEmpty.hidden = storage.nodes.size > 0;
+
+    if (!storage.nodes.size) {
+        tbody.replaceChildren();
+        return;
+    }
+
+    const rows = flattenStorage();
+    const fragment = document.createDocumentFragment();
+
+    for (const item of rows) {
+        const tr = document.createElement('tr');
+        const isRest = item.rest !== undefined;
+        const bytes = isRest ? item.rest : item.node.bytes;
+
+        if (isRest) {
+            tr.className = 'storage-rest';
+        } else {
+            tr.dataset.node = item.node.id;
+            if (item.node.id === storage.selected) {
+                tr.classList.add('selected');
+            }
+            if (item.node.id === storage.mapRoot && item.node.id !== storage.root) {
+                tr.classList.add('map-root');
+            }
+        }
+
+        for (const column of FOLDER_COLUMNS) {
+            const td = document.createElement('td');
+            if (column.align === 'right') {
+                td.className = 'num';
+            }
+
+            if (column.key === 'name') {
+                td.append(storageNameCell(item, isRest));
+            } else if (column.key === 'size') {
+                td.textContent = formatBytes(bytes);
+            } else if (column.key === 'share') {
+                td.append(storageShareCell(bytes));
+            } else if (column.key === 'files') {
+                td.textContent = isRest ? '' : nf0.format(item.node.files);
+            } else {
+                td.textContent = isRest || !item.node.childCount ? '' : nf0.format(item.node.childCount);
+            }
+
+            tr.append(td);
+        }
+
+        fragment.append(tr);
+    }
+
+    tbody.replaceChildren(fragment);
+
+    if (rows.length >= MAX_STORAGE_ROWS) {
+        elements.storageStatus.textContent =
+            `${nf0.format(MAX_STORAGE_ROWS)} Zeilen — mehr wird nicht gezeigt. Weniger aufklappen.`;
+    }
+}
+
+function storageNameCell(item, isRest) {
+    const wrap = document.createElement('div');
+    wrap.className = 'name-cell';
+    wrap.style.paddingLeft = item.depth ? `${item.depth * 16}px` : '';
+
+    if (isRest) {
+        const label = document.createElement('span');
+        label.className = 'muted-cell';
+        label.textContent = 'übrige';
+
+        // Der Rest besteht aus zwei Dingen, und welches davon überwiegt, ändert
+        // die Antwort: viele kleine Dateien räumt man anders auf als einen
+        // Unterordner, der nur zu klein für den Auszug war.
+        const pruned = Math.max(0, item.rest - item.node.own);
+        label.title = 'Alles in diesem Ordner, was keine eigene Zeile hat:\n'
+            + `${formatBytes(item.node.own)} in Dateien unmittelbar hier\n`
+            + `${formatBytes(pruned)} in Unterordnern, die für den Auszug zu klein waren`
+            + (pruned > 0 ? '\n\nAufklappen holt die größten davon nach.' : '');
+        wrap.append(label);
+        return wrap;
+    }
+
+    const node = item.node;
+    if (storageExpandable(node) || knownChildren(node.id).length) {
+        const toggle = document.createElement('button');
+        toggle.className = 'expander';
+        toggle.type = 'button';
+        toggle.dataset.expand = node.id;
+        toggle.textContent = storage.pending.has(node.id)
+            ? '…'
+            : storage.expanded.has(node.id) ? '▾' : '▸';
+        wrap.append(toggle);
+    } else {
+        wrap.append(Object.assign(document.createElement('span'), { className: 'expander-spacer' }));
+    }
+
+    const name = document.createElement('span');
+    name.textContent = node.name;
+    if (node.isFile) {
+        name.className = 'storage-file';
+    }
+    name.title = storagePath(node.id);
+    wrap.append(name);
+
+    for (const flag of String(node.flags).split(',').map(part => part.trim()).filter(Boolean)) {
+        const hint = FOLDER_FLAG_HINTS[flag];
+        if (!hint) {
+            continue;
+        }
+        const mark = document.createElement('span');
+        mark.className = `storage-flag flag-${flag}`;
+        mark.textContent = flag === 'denied' ? '✕' : flag === 'reparse' ? '↗' : '≈';
+        mark.title = hint;
+        wrap.append(mark);
+    }
+
+    return wrap;
+}
+
+function storageShareCell(bytes) {
+    const percent = storage.total > 0 ? (bytes * 100) / storage.total : 0;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'share-cell';
+
+    const bar = document.createElement('span');
+    bar.className = 'share-bar';
+    const fill = document.createElement('i');
+    fill.style.width = `${Math.min(100, percent)}%`;
+    bar.append(fill);
+
+    const text = document.createElement('span');
+    text.className = 'share-text';
+    text.textContent = `${nf1.format(percent)} %`;
+
+    wrap.append(bar, text);
+    return wrap;
+}
+
+// ---------- Kachelkarte ----------
+
+function parseColor(value) {
+    const hex = value.trim();
+    if (hex.startsWith('#')) {
+        const digits = hex.length === 4
+            ? [...hex.slice(1)].map(part => part + part).join('')
+            : hex.slice(1);
+        const number = parseInt(digits, 16);
+        return [(number >> 16) & 255, (number >> 8) & 255, number & 255];
+    }
+
+    const parts = hex.match(/\d+/g);
+    return parts ? parts.slice(0, 3).map(Number) : [128, 128, 128];
+}
+
+function mixColor(from, to, amount) {
+    return from.map((channel, index) => Math.round(channel + (to[index] - channel) * amount));
+}
+
+function rgb(color) {
+    return `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+}
+
+/**
+ * Die Farben kommen aus den Schema-Variablen, nicht aus fest verdrahteten
+ * Werten — sonst zöge die Karte bei einem Wechsel des Farbschemas nicht mit.
+ * Mit der Tiefe wandert der Farbton in Richtung Textfarbe: im dunklen Schema
+ * wird es dadurch heller, im hellen dunkler, und der Kontrast bleibt in beiden.
+ */
+function themePalette() {
+    const style = getComputedStyle(document.documentElement);
+    return {
+        series: ['--cpu', '--gpu', '--ram', '--net', '--disk']
+            .map(name => parseColor(style.getPropertyValue(name))),
+        text: parseColor(style.getPropertyValue('--text')),
+        panel: parseColor(style.getPropertyValue('--panel')),
+        muted: parseColor(style.getPropertyValue('--muted')),
+    };
+}
+
+/** Der Vorfahr eines Knotens auf der ersten Ebene unter der Kartenwurzel. */
+function paletteIndex(id) {
+    let cursor = id;
+    let previous = id;
+    while (cursor >= 0 && cursor !== storage.mapRoot) {
+        previous = cursor;
+        const node = storage.nodes.get(cursor);
+        if (!node) {
+            break;
+        }
+        cursor = node.parent;
+    }
+    return previous;
+}
+
+function worstRatio(row, side, scale) {
+    let sum = 0;
+    let min = Infinity;
+    let max = 0;
+    for (const value of row) {
+        sum += value;
+        min = Math.min(min, value);
+        max = Math.max(max, value);
+    }
+
+    sum *= scale;
+    min *= scale;
+    max *= scale;
+    if (sum <= 0 || min <= 0) {
+        return Infinity;
+    }
+
+    const side2 = side * side;
+    const sum2 = sum * sum;
+    return Math.max((side2 * max) / sum2, sum2 / (side2 * min));
+}
+
+/**
+ * Squarified Treemap nach Bruls, Huizing und van Kesteren: die Kinder werden
+ * absteigend zeilenweise verteilt, und eine Zeile wird genau so lange gefüllt,
+ * wie sich das Seitenverhältnis der Kacheln dadurch verbessert. Ohne das
+ * entstünden lange dünne Streifen, deren Flächen niemand vergleichen kann.
+ */
+function squarify(items, x, y, w, h, emit) {
+    const queue = items.filter(item => item.value > 0);
+    let total = queue.reduce((sum, item) => sum + item.value, 0);
+    let index = 0;
+
+    while (index < queue.length && w > 0.5 && h > 0.5 && total > 0) {
+        const scale = (w * h) / total;
+        const vertical = w >= h;
+        const side = vertical ? h : w;
+
+        const row = [];
+        let best = Infinity;
+        while (index + row.length < queue.length) {
+            const values = row.map(item => item.value);
+            values.push(queue[index + row.length].value);
+            const ratio = worstRatio(values, side, scale);
+            if (row.length && ratio > best) {
+                break;
+            }
+            best = ratio;
+            row.push(queue[index + row.length]);
+        }
+
+        const rowSum = row.reduce((sum, item) => sum + item.value, 0);
+        const thickness = (rowSum * scale) / side;
+        let offset = 0;
+
+        for (const item of row) {
+            const length = (item.value * scale) / thickness;
+            if (vertical) {
+                emit(item, x, y + offset, thickness, length);
+            } else {
+                emit(item, x + offset, y, length, thickness);
+            }
+            offset += length;
+        }
+
+        if (vertical) {
+            x += thickness;
+            w -= thickness;
+        } else {
+            y += thickness;
+            h -= thickness;
+        }
+
+        index += row.length;
+        total -= rowSum;
+    }
+}
+
+function drawTreemap() {
+    const canvas = elements.storageCanvas;
+    const wrap = canvas.parentElement;
+    const width = wrap.clientWidth;
+    const height = wrap.clientHeight;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+
+    const context = canvas.getContext('2d');
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    context.clearRect(0, 0, width, height);
+
+    storage.rects = [];
+
+    const root = storage.nodes.get(storage.mapRoot);
+    if (!root || !root.bytes) {
+        return;
+    }
+
+    const palette = themePalette();
+    const seriesFor = new Map();
+    let nextColor = 0;
+
+    const colorOf = (id, depth) => {
+        const top = paletteIndex(id);
+        if (!seriesFor.has(top)) {
+            seriesFor.set(top, palette.series[nextColor++ % palette.series.length]);
+        }
+        return mixColor(seriesFor.get(top), palette.text, Math.min(0.55, depth * 0.16));
+    };
+
+    const layout = (id, x, y, w, h, depth) => {
+        const node = storage.nodes.get(id);
+        if (!node) {
+            return;
+        }
+
+        const children = sortedStorageChildren(id)
+            .map(child => ({ id: child, value: storage.nodes.get(child).bytes }))
+            .filter(item => item.value > 0)
+            .sort((left, right) => right.value - left.value);
+
+        // Was keine eigene Kachel hat, bekommt trotzdem seinen Platz — sonst
+        // wären die Flächen zu groß und die Karte löge über die Verhältnisse.
+        const rest = storageRest(node);
+        const items = rest > 0 ? [...children, { id: -1, value: rest }] : children;
+
+        squarify(items, x, y, w, h, (item, tileX, tileY, tileW, tileH) => {
+            if (tileW < 1 || tileH < 1) {
+                return;
+            }
+
+            const child = item.id >= 0 ? storage.nodes.get(item.id) : null;
+            const fill = child
+                ? colorOf(item.id, depth)
+                : mixColor(palette.panel, palette.muted, 0.35);
+
+            context.fillStyle = rgb(fill);
+            context.fillRect(tileX, tileY, tileW, tileH);
+            context.strokeStyle = rgb(palette.panel);
+            context.lineWidth = 1;
+            context.strokeRect(tileX + 0.5, tileY + 0.5, Math.max(0, tileW - 1), Math.max(0, tileH - 1));
+
+            if (child) {
+                storage.rects.push({ id: item.id, x: tileX, y: tileY, w: tileW, h: tileH, depth });
+            }
+
+            const label = child ? child.name : 'übrige';
+
+            // Die Grenze ist die Kachelgröße, nicht die Tiefe: Ketten wie
+            // Users → Stefan → AppData verbrauchen drei Ebenen, ohne etwas zu
+            // zeigen, und ausgerechnet darunter liegt meist die Antwort. Weil
+            // jede Ebene 4 px Breite und 20 px Höhe abzieht, endet die Rekursion
+            // von selbst; die Tiefenschranke fängt nur pathologische Bäume ab.
+            const canNest = child && !child.isFile && knownChildren(item.id).length
+                && tileW > 90 && tileH > 64 && depth < 8;
+
+            if (tileW > 60 && tileH > 18) {
+                drawTileLabel(context, label, fill, palette, tileX, tileY, tileW, canNest);
+            }
+
+            if (canNest) {
+                layout(item.id, tileX + 2, tileY + 18, tileW - 4, tileH - 20, depth + 1);
+            }
+
+            if (item.id === storage.selected) {
+                context.strokeStyle = rgb(palette.text);
+                context.lineWidth = 2;
+                context.strokeRect(tileX + 1, tileY + 1, Math.max(0, tileW - 2), Math.max(0, tileH - 2));
+            }
+        });
+    };
+
+    layout(storage.mapRoot, 0, 0, width, height, 0);
+}
+
+function drawTileLabel(context, label, fill, palette, x, y, w, header) {
+    // Helle Kachel, dunkle Schrift und umgekehrt — sonst verschwindet die
+    // Beschriftung ausgerechnet auf den größten Flächen.
+    const luminance = (fill[0] * 299 + fill[1] * 587 + fill[2] * 114) / 1000;
+    context.fillStyle = luminance > 140 ? 'rgba(0, 0, 0, 0.82)' : 'rgba(255, 255, 255, 0.9)';
+    context.font = `${header ? 12 : 11}px system-ui, sans-serif`;
+    context.textBaseline = 'top';
+
+    context.save();
+    context.beginPath();
+    context.rect(x + 4, y + 3, Math.max(0, w - 8), 14);
+    context.clip();
+    context.fillText(label, x + 5, y + 4);
+    context.restore();
+}
+
+function treemapHit(x, y) {
+    // Rückwärts: die zuletzt gezeichnete Kachel liegt oben.
+    for (let i = storage.rects.length - 1; i >= 0; i--) {
+        const rect = storage.rects[i];
+        if (x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) {
+            return rect;
+        }
+    }
+    return null;
+}
+
+function renderCrumbs() {
+    const chain = [];
+    for (let cursor = storage.mapRoot; cursor >= 0;) {
+        const node = storage.nodes.get(cursor);
+        if (!node) {
+            break;
+        }
+        chain.unshift(node);
+        cursor = node.parent;
+    }
+
+    elements.storageCrumbs.replaceChildren(...chain.flatMap((node, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'crumb';
+        button.textContent = node.name;
+        button.title = storagePath(node.id);
+        button.disabled = node.id === storage.mapRoot;
+        button.addEventListener('click', () => {
+            storage.mapRoot = node.id;
+            renderCrumbs();
+            drawTreemap();
+        });
+
+        if (index === 0) {
+            return [button];
+        }
+
+        const separator = document.createElement('span');
+        separator.className = 'crumb-sep';
+        separator.textContent = '›';
+        return [separator, button];
+    }));
+
+    const node = storage.nodes.get(storage.mapRoot);
+    if (node) {
+        const size = document.createElement('span');
+        size.className = 'crumb-size';
+        size.textContent = formatBytes(node.bytes);
+        elements.storageCrumbs.append(size);
+    }
+}
+
+// ---------- Speicher: Steuerung ----------
+
+function resetStorage(scanId) {
+    storage.scanId = scanId;
+    storage.nodes.clear();
+    storage.children.clear();
+    storage.expanded.clear();
+    storage.pending.clear();
+    storage.selected = null;
+    storage.rects = [];
+    storage.root = 0;
+    storage.mapRoot = 0;
+    storage.total = 0;
+    storage.summary = null;
+}
+
+function selectStorageNode(id, reveal) {
+    storage.selected = id;
+
+    if (reveal) {
+        // Alle Vorfahren aufklappen, sonst zeigt die Auswahl auf eine Zeile, die
+        // es gar nicht gibt.
+        for (let cursor = storage.nodes.get(id)?.parent ?? -1; cursor >= 0;) {
+            storage.expanded.add(cursor);
+            cursor = storage.nodes.get(cursor)?.parent ?? -1;
+        }
+    }
+
+    renderStorageTable();
+    drawTreemap();
+
+    if (reveal) {
+        elements.storageTable.querySelector(`tr[data-node="${id}"]`)
+            ?.scrollIntoView({ block: 'nearest' });
+    }
+}
+
+function toggleStorageNode(id) {
+    if (storage.expanded.has(id)) {
+        storage.expanded.delete(id);
+        renderStorageTable();
+        return;
+    }
+
+    storage.expanded.add(id);
+
+    const node = storage.nodes.get(id);
+    if (node && storageExpandable(node) && !storage.pending.has(id)) {
+        storage.pending.add(id);
+        send('expandFolder', { scan: storage.scanId, node: id });
+    }
+
+    renderStorageTable();
+}
+
+function storageSummaryText() {
+    const data = storage.summary;
+    if (!data) {
+        return '–';
+    }
+
+    const parts = [
+        `${formatBytes(data.totalBytes)} in ${nf0.format(data.files || 0)} Dateien`,
+        `${nf0.format(data.dirs || 0)} Ordner`,
+        `${nf1.format(data.seconds || 0)} s`,
+    ];
+
+    if (data.denied) {
+        parts.push(`${nf0.format(data.denied)} nicht lesbar`);
+    }
+    if (data.reparse) {
+        parts.push(`${nf0.format(data.reparse)} Abzweigungen übersprungen`);
+    }
+
+    return parts.join('  ·  ');
+}
+
+/**
+ * Der Hinweis unter der Leiste. Er trägt die Vorbehalte, ohne die die Zahlen
+ * darüber falsch gelesen würden — allen voran ein abgebrochener Lauf, dessen
+ * halbfertige Zweige zu klein dastehen.
+ */
+function renderStorageNote() {
+    const data = storage.summary;
+    if (!data) {
+        elements.storageNote.hidden = true;
+        return;
+    }
+
+    const notes = [];
+    if (data.cancelled) {
+        notes.push('Abgebrochen — die Summen der noch nicht fertigen Zweige sind zu klein.');
+    }
+
+    if (data.volumeUsedBytes) {
+        const delta = data.totalBytes - data.volumeUsedBytes;
+        const sign = delta >= 0 ? '+' : '−';
+        notes.push(
+            `Windows meldet ${formatBytes(data.volumeUsedBytes)} belegt, hier stehen `
+            + `${formatBytes(data.totalBytes)} (${sign}${formatBytes(Math.abs(delta))}). `
+            + 'Die Differenz ist erwartet: harte Verknüpfungen zählen doppelt, während NTFS-Metadaten, '
+            + 'nicht lesbare Ordner, Schattenkopien und übersprungene Abzweigungen hier fehlen.');
+    }
+
+    if (data.cloudBytes) {
+        notes.push(`${formatBytes(data.cloudBytes)} davon sind Cloud-Platzhalter und liegen nicht auf dem Datenträger.`);
+    }
+
+    elements.storageNote.textContent = notes.join(' ');
+    elements.storageNote.hidden = notes.length === 0;
+    elements.storageNote.classList.toggle('warn', Boolean(data.cancelled));
+}
+
+function setStorageRunning(running) {
+    storage.running = running;
+    elements.storageStart.hidden = running;
+    elements.storageCancel.hidden = !running;
+    elements.storageDrive.disabled = running;
+}
+
+function renderScan(data) {
+    if (data.phase === 'running') {
+        storage.scanId = data.scanId;
+        setStorageRunning(true);
+        elements.storageStatus.textContent =
+            `${nf0.format(data.dirs || 0)} Ordner  ·  ${nf0.format(data.files || 0)} Dateien  ·  `
+            + `${formatBytes(data.bytes)}  ·  ${data.current || ''}`;
+        return;
+    }
+
+    if (data.phase === 'children') {
+        if (data.scanId !== storage.scanId) {
+            return;
+        }
+        storage.pending.delete(data.parent);
+        ingestStorageNodes(data.nodes);
+        renderStorageTable();
+        drawTreemap();
+        return;
+    }
+
+    if (data.phase === 'error') {
+        setStorageRunning(false);
+        elements.storageStatus.textContent = data.message || 'Der Scan ist fehlgeschlagen.';
+        return;
+    }
+
+    if (data.phase !== 'done') {
+        return;
+    }
+
+    setStorageRunning(false);
+    resetStorage(data.scanId);
+    ingestStorageNodes(data.nodes);
+
+    storage.summary = data;
+    storage.total = data.totalBytes || 0;
+    storage.root = data.nodes?.length ? data.nodes[0].i : 0;
+    storage.mapRoot = storage.root;
+    storage.expanded.add(storage.root);
+
+    elements.storageStatus.textContent = storageSummaryText();
+    renderStorageNote();
+    renderStorageHead();
+    renderStorageTable();
+    renderCrumbs();
+    drawTreemap();
+}
+
+/**
+ * Füllt die Laufwerksauswahl aus der Systemübersicht. Angeboten wird nur, was
+ * der Host auch annimmt: ein Netzlaufwerk in der Liste wäre ein Eintrag, der
+ * beim Anklicken jedes Mal abgelehnt würde.
+ */
+function fillStorageDrives(drives) {
+    const volumes = (drives || [])
+        .flatMap(drive => drive.volumes || [])
+        .filter(volume => volume.driveType === 'fixed' || volume.driveType === 'removable');
+
+    if (!volumes.length) {
+        return;
+    }
+
+    const previous = elements.storageDrive.value;
+    elements.storageDrive.replaceChildren(...volumes.map(volume => {
+        const option = document.createElement('option');
+        option.value = volume.name;
+        option.textContent = volume.label
+            ? `${volume.name}  ${volume.label}  —  ${formatBytes(volume.freeBytes)} frei`
+            : `${volume.name}  —  ${formatBytes(volume.freeBytes)} frei`;
+        return option;
+    }));
+
+    // Vorgewählt ist das vollste Laufwerk — deswegen ist man hier.
+    const fullest = volumes.reduce(
+        (worst, volume) => (volume.usedPercent > worst.usedPercent ? volume : worst), volumes[0]);
+    elements.storageDrive.value = volumes.some(volume => volume.name === previous)
+        ? previous
+        : fullest.name;
+}
+
+elements.storageStart.addEventListener('click', () => {
+    const path = elements.storageDrive.value;
+    if (!path) {
+        return;
+    }
+
+    setStorageRunning(true);
+    elements.storageStatus.textContent = 'Wird durchsucht …';
+    elements.storageNote.hidden = true;
+    send('startFolderScan', { path });
+});
+
+elements.storageCancel.addEventListener('click', () => {
+    elements.storageStatus.textContent = 'Wird abgebrochen …';
+    send('cancelFolderScan');
+});
+
+elements.storageFiles.addEventListener('change', () => {
+    renderStorageTable();
+    drawTreemap();
+});
+
+elements.storageTable.tBodies[0].addEventListener('click', event => {
+    const expander = event.target.closest('.expander');
+    if (expander) {
+        event.stopPropagation();
+        toggleStorageNode(Number(expander.dataset.expand));
+        return;
+    }
+
+    const tr = event.target.closest('tr[data-node]');
+    if (tr) {
+        selectStorageNode(Number(tr.dataset.node), false);
+    }
+});
+
+elements.storageTable.tBodies[0].addEventListener('dblclick', event => {
+    const tr = event.target.closest('tr[data-node]');
+    if (!tr) {
+        return;
+    }
+
+    const id = Number(tr.dataset.node);
+    const node = storage.nodes.get(id);
+    if (node && !node.isFile) {
+        storage.mapRoot = id;
+        renderCrumbs();
+        drawTreemap();
+    }
+});
+
+elements.storageCanvas.addEventListener('mousemove', event => {
+    const bounds = elements.storageCanvas.getBoundingClientRect();
+    const hit = treemapHit(event.clientX - bounds.left, event.clientY - bounds.top);
+
+    if (!hit) {
+        elements.storageTip.hidden = true;
+        return;
+    }
+
+    const node = storage.nodes.get(hit.id);
+    const percent = storage.total > 0 ? (node.bytes * 100) / storage.total : 0;
+    elements.storageTip.textContent = `${storagePath(hit.id)} — ${formatBytes(node.bytes)} (${nf1.format(percent)} %)`;
+    elements.storageTip.hidden = false;
+
+    // Am Zeiger, aber innerhalb der Karte.
+    const tip = elements.storageTip;
+    const left = Math.min(event.clientX - bounds.left + 12, bounds.width - tip.offsetWidth - 8);
+    const top = Math.min(event.clientY - bounds.top + 14, bounds.height - tip.offsetHeight - 8);
+    tip.style.left = `${Math.max(4, left)}px`;
+    tip.style.top = `${Math.max(4, top)}px`;
+});
+
+elements.storageCanvas.addEventListener('mouseleave', () => {
+    elements.storageTip.hidden = true;
+});
+
+elements.storageCanvas.addEventListener('click', event => {
+    const bounds = elements.storageCanvas.getBoundingClientRect();
+    const hit = treemapHit(event.clientX - bounds.left, event.clientY - bounds.top);
+    if (hit) {
+        selectStorageNode(hit.id, true);
+    }
+});
+
+elements.storageCanvas.addEventListener('dblclick', event => {
+    const bounds = elements.storageCanvas.getBoundingClientRect();
+    const hit = treemapHit(event.clientX - bounds.left, event.clientY - bounds.top);
+    const node = hit && storage.nodes.get(hit.id);
+    if (!node || node.isFile) {
+        return;
+    }
+
+    storage.mapRoot = hit.id;
+    if (storageExpandable(node) && !storage.pending.has(hit.id)) {
+        storage.pending.add(hit.id);
+        send('expandFolder', { scan: storage.scanId, node: hit.id });
+    }
+
+    renderCrumbs();
+    drawTreemap();
+});
+
+function storageMenu(event, id) {
+    const node = storage.nodes.get(id);
+    if (!node) {
+        return;
+    }
+
+    event.preventDefault();
+    selectStorageNode(id, false);
+
+    const entries = [
+        ['Im Explorer öffnen', () => send('openFolder', { scan: storage.scanId, node: id })],
+        ['Pfad kopieren', () => send('copyFolderPath', { scan: storage.scanId, node: id })],
+    ];
+
+    if (!node.isFile) {
+        entries.unshift(['Als Kartenwurzel setzen', () => {
+            storage.mapRoot = id;
+            renderCrumbs();
+            drawTreemap();
+        }]);
+    }
+
+    showRowMenu(event, entries);
+}
+
+elements.storageTable.tBodies[0].addEventListener('contextmenu', event => {
+    const tr = event.target.closest('tr[data-node]');
+    if (tr) {
+        storageMenu(event, Number(tr.dataset.node));
+    }
+});
+
+elements.storageCanvas.addEventListener('contextmenu', event => {
+    const bounds = elements.storageCanvas.getBoundingClientRect();
+    const hit = treemapHit(event.clientX - bounds.left, event.clientY - bounds.top);
+    if (hit) {
+        storageMenu(event, hit.id);
+    }
+});
+
+// Die Karte hängt an der Fenstergröße; ein Neuzeichnen kostet nichts, solange
+// der Reiter nicht offen ist, weil clientWidth dann null ist.
+new ResizeObserver(() => {
+    if (state.view === 'storage') {
+        drawTreemap();
+    }
+}).observe(elements.storageCanvas.parentElement);
+
+// Die Kopfzeile steht von Anfang an — nicht oben im Anlaufblock, weil FOLDER_COLUMNS
+// erst hier deklariert ist und eine Konstante vor ihrer Deklaration nicht gelesen
+// werden darf.
+renderStorageHead();
+
 // ---------- Host-Nachrichten ----------
 
 if (host) {
@@ -3217,6 +4294,11 @@ if (host) {
 
         if (data.type === 'system') {
             renderSystemInfo(data);
+            return;
+        }
+
+        if (data.type === 'scan') {
+            renderScan(data);
             return;
         }
 

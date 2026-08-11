@@ -463,7 +463,10 @@ public static class SystemInfoProvider
                     string.IsNullOrWhiteSpace(drive.VolumeLabel) ? null : drive.VolumeLabel,
                     drive.DriveFormat,
                     drive.TotalSize,
-                    drive.AvailableFreeSpace);
+                    drive.AvailableFreeSpace)
+                {
+                    Type = drive.DriveType,
+                };
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {

@@ -20,6 +20,13 @@ public sealed record VolumeInfo(
     public long UsedBytes => TotalBytes - FreeBytes;
 
     public double UsedPercent => TotalBytes > 0 ? UsedBytes * 100.0 / TotalBytes : 0;
+
+    /// <summary>
+    /// Woran das Laufwerk hängt. Der Reiter „Speicher" bietet nur an, was sich
+    /// sinnvoll durchsuchen lässt — ein Netzlaufwerk in der Auswahl wäre ein
+    /// Eintrag, der beim Anklicken immer nur abgelehnt würde.
+    /// </summary>
+    public DriveType Type { get; init; } = DriveType.Unknown;
 }
 
 /// <summary>Ein physischer Datenträger samt der darauf liegenden Laufwerke.</summary>

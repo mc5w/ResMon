@@ -1,5 +1,7 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using ResMon.App.Bridge;
 using ResMon.App.Native;
@@ -8,6 +10,7 @@ using ResMon.Core.Diagnostics;
 using ResMon.Core.Inventory;
 using ResMon.Core.Model;
 using ResMon.Core.Processes;
+using ResMon.Core.Storage;
 // WinForms ist wegen des Tray-Icons referenziert und bringt eigene Typen mit.
 using MessageBox = System.Windows.MessageBox;
 
@@ -27,6 +30,10 @@ public partial class DetailWindow : Window
 
     /// <summary>–1 erzwingt das Senden des ersten Protokollstands, auch wenn er leer ist.</summary>
     private int _lastSentLogVersion = -1;
+
+    private FolderScanSession? _scan;
+    private DispatcherTimer? _scanProgress;
+    private int _scanId;
 
     public DetailWindow(AppSettings settings)
     {
@@ -156,6 +163,23 @@ public partial class DetailWindow : Window
             case "requestSettings":
                 PushSettings();
                 break;
+            case "startFolderScan" when command.Path is { } path:
+                StartFolderScan(path);
+                break;
+            case "cancelFolderScan":
+                _scan?.Cancel();
+                break;
+            case "expandFolder" when command.Scan is { } scan && command.Node is { } node:
+                PushFolderChildren(scan, node);
+                break;
+            case "openFolder" when command.Scan is { } scan && command.Node is { } node:
+                if (ResolveScanPath(scan, node) is { } target)
+                    PathActions.Reveal(this, target);
+                break;
+            case "copyFolderPath" when command.Scan is { } scan && command.Node is { } node:
+                if (ResolveScanPath(scan, node) is { } copied)
+                    PathActions.Copy(this, copied);
+                break;
             default:
                 if (ApplySetting(command))
                 {
@@ -164,6 +188,184 @@ public partial class DetailWindow : Window
                 }
                 break;
         }
+    }
+
+    /// <summary>
+    /// Räumt einen laufenden Scan ab. Ein Durchlauf über sechs Threads für ein
+    /// Fenster, das niemand mehr ansieht, widerspräche DESIGN.md §9 — genauso wie
+    /// die Prozessabtastung, die beim Schließen ebenfalls aufhört.
+    /// </summary>
+    protected override void OnClosed(EventArgs e)
+    {
+        // Reihenfolge: erst die Seite abmelden, dann stornieren. Eine Nutzlast an
+        // eine geschlossene WebView wirft.
+        _webReady = false;
+        _scanProgress?.Stop();
+
+        FolderScanSession? session = _scan;
+        _scan = null;
+        session?.Cancel();
+
+        // Ein noch laufender Lauf wird von der wartenden Fortsetzung abgeräumt,
+        // sobald seine Threads durch sind; vorher darf die Abbruchmarke nicht weg.
+        if (session?.Result is not null)
+            session.Dispose();
+
+        base.OnClosed(e);
+    }
+
+    /// <summary>
+    /// Startet einen Ordner-Scan. Die Sitzung liegt im Fenster und nicht im
+    /// Anwendungsrumpf: die Handlung ist fensterbezogen, vom Benutzer ausgelöst,
+    /// und ihre gesamte Ausgabe geht in diese eine WebView.
+    /// </summary>
+    private async void StartFolderScan(string requested)
+    {
+        if (ValidateRoot(requested) is not { } root)
+        {
+            if (_webReady)
+            {
+                Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildScanStatusPayload(
+                    _scanId, "error", $"„{requested}“ ist kein Laufwerk, das sich durchsuchen lässt."));
+            }
+
+            return;
+        }
+
+        // Ein zweiter Lauf storniert den ersten; auf dessen Ende zu warten hieße,
+        // den UI-Thread zu blockieren. Das alte Ergebnis erkennt sich beim
+        // Eintreffen am Sitzungsvergleich als überholt — dieselbe Sicherung wie
+        // bei der Systemübersicht in App.RefreshSystemInfo.
+        _scan?.Cancel();
+
+        var session = new FolderScanSession(root, ++_scanId);
+        _scan = session;
+        StartProgressTimer();
+
+        try
+        {
+            FolderScanResult result = await session.RunAsync();
+            if (!ReferenceEquals(_scan, session))
+                return;
+
+            _scanProgress?.Stop();
+            if (_webReady)
+                Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildScanPayload(result, session.ScanId));
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Report("Ordner-Scan", ex, $"„{root}“ ließ sich nicht durchsuchen");
+            if (!ReferenceEquals(_scan, session))
+                return;
+
+            _scanProgress?.Stop();
+            if (_webReady)
+            {
+                Web.CoreWebView2.PostWebMessageAsJson(
+                    WebBridge.BuildScanStatusPayload(session.ScanId, "error", ex.Message));
+            }
+        }
+        finally
+        {
+            // Wurde die Sitzung überholt oder das Fenster geschlossen, hält sie
+            // niemand mehr — und ihre Threads sind jetzt sicher durch.
+            if (!ReferenceEquals(_scan, session))
+                session.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Nimmt ausschließlich Laufwerkswurzeln an. Damit kann die Seite den Host
+    /// nicht dazu bringen, einen beliebigen Pfad abzulaufen; alles Weitere läuft
+    /// über ganzzahlige Kennungen in einen Baum, den der Host selbst gebaut hat.
+    /// Netzlaufwerke bleiben draußen — ein Scan über eine langsame Leitung ist
+    /// eine Falle, keine Funktion.
+    /// </summary>
+    private static string? ValidateRoot(string requested)
+    {
+        if (string.IsNullOrWhiteSpace(requested))
+            return null;
+
+        // Ohne abschließenden Trennstrich vergleichen: die Systemübersicht führt
+        // die Laufwerke als „C:" (SystemInfoProvider schneidet ihn ab), während
+        // DriveInfo sie als „C:\" nennt. Die Seite reicht weiter, was sie von
+        // dort bekommen hat.
+        string wanted = requested.TrimEnd('\\', '/');
+
+        try
+        {
+            foreach (DriveInfo drive in DriveInfo.GetDrives())
+            {
+                if (!drive.IsReady || drive.DriveType is not (DriveType.Fixed or DriveType.Removable))
+                    continue;
+
+                if (string.Equals(drive.Name.TrimEnd('\\'), wanted, StringComparison.OrdinalIgnoreCase))
+                    return drive.RootDirectory.FullName;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            DiagnosticLog.Report("Ordner-Scan", ex, "Die Laufwerksliste ließ sich nicht lesen");
+        }
+
+        return null;
+    }
+
+    /// <summary>Reicht die Kinder eines Knotens nach, die im Auszug fehlten.</summary>
+    private void PushFolderChildren(int scanId, int node)
+    {
+        if (CurrentResult(scanId) is not { } result || !_webReady)
+            return;
+
+        Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildScanChildrenPayload(result, scanId, node));
+    }
+
+    private string? ResolveScanPath(int scanId, int node)
+    {
+        if (CurrentResult(scanId) is not { } result || !result.IsKnown(node))
+            return null;
+
+        return result.PathOf(node);
+    }
+
+    /// <summary>
+    /// Das Ergebnis des benannten Laufs — oder nichts. Die Kennung ist die
+    /// Sicherung dagegen, dass ein Nachschlag aus einem überholten Scan in einen
+    /// anderen Baum zeigt.
+    /// </summary>
+    private FolderScanResult? CurrentResult(int scanId)
+        => _scan is { } session && session.ScanId == scanId ? session.Result : null;
+
+    private void StartProgressTimer()
+    {
+        // Vier Meldungen je Sekunde: genug, dass der Fortschritt lebt, wenig
+        // genug, dass er nichts kostet. Der Fortschritt wird geholt und nicht
+        // geschickt — ein Rückruf je Ordner wären zweihunderttausend Aufrufe
+        // durch den Synchronisierungskontext.
+        _scanProgress ??= CreateProgressTimer();
+        _scanProgress.Start();
+    }
+
+    private DispatcherTimer CreateProgressTimer()
+    {
+        // DispatcherTimer mit Absicht: die Nachricht muss ohnehin auf den
+        // UI-Thread, er endet mit dem Fenster, und beim Anhalten gibt es kein
+        // Wettrennen mit einem noch laufenden Rückruf.
+        var timer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(250),
+        };
+
+        timer.Tick += (_, _) =>
+        {
+            if (_scan is not { } session || !_webReady)
+                return;
+
+            Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildScanProgressPayload(
+                session.ScanId, session.Directories, session.Files, session.Bytes, session.CurrentPath));
+        };
+
+        return timer;
     }
 
     /// <summary>

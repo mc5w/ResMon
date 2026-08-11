@@ -406,12 +406,14 @@ body {
     color: var(--muted);
 }
 
-/* Gilt für alle Suchfelder — das der Prozesstabelle und das der Verbindungen.
-   Ohne die gemeinsame Regel zeichnet der Browser das zweite Feld im
-   Systemton, und das ist im dunklen Schema ein weißer Kasten. */
-.controls input[type="search"] {
-    flex: 1 1 180px;
-    max-width: 280px;
+/* Gilt für alle Suchfelder — das der Prozesstabelle und das der Verbindungen —
+   und für die Laufwerksauswahl im Reiter „Speicher". Ohne die gemeinsame Regel
+   zeichnet der Browser sie im Systemton, und das ist im dunklen Schema ein
+   weißer Kasten. `font: inherit` ist dabei nicht schmückend: Formularelemente
+   erben die Schrift nicht von selbst, sie stünden sonst in der Standardgröße des
+   Browsers neben einer 12-Pixel-Leiste. */
+.controls input[type="search"],
+.controls select {
     padding: 6px 10px;
     border-radius: 7px;
     border: 1px solid var(--border);
@@ -420,12 +422,28 @@ body {
     font: inherit;
 }
 
+.controls input[type="search"] {
+    flex: 1 1 180px;
+    max-width: 280px;
+}
+
+.controls select {
+    flex: 0 1 auto;
+    max-width: 320px;
+    cursor: pointer;
+}
+
 .controls input[type="search"]::placeholder {
     color: var(--muted);
 }
 
-.controls input[type="search"]:focus {
+.controls input[type="search"]:focus,
+.controls select:focus {
     outline: none;
+    border-color: var(--cpu);
+}
+
+.controls select:hover {
     border-color: var(--cpu);
 }
 
@@ -1661,6 +1679,197 @@ td.conn-none {
 .hot { color: #f87171; }
 .warm { color: #fbbf24; }
 
+/* ---------- Speicher ----------
+
+   Baum und Kachelkarte teilen sich die Breite je zur Hälfte: der Baum trägt die
+   Arbeit, die Karte den Blick. Beide Spalten bekommen minmax(0, 1fr), sonst
+   drückte ein langer Pfad in der Namensspalte die Karte aus dem Fenster. */
+
+.storage-split {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+}
+
+.storage-tree {
+    min-width: 0;
+}
+
+/* Vor dem ersten Lauf steht die Tabelle leer da und sähe ohne diesen Hinweis
+   nach einem Fehler aus. Er nennt zugleich den Preis: dieser Reiter tut nichts
+   von selbst. */
+.storage-empty {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+    max-width: 46ch;
+    padding: 14px 12px;
+}
+
+.storage-map {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px;
+}
+
+.storage-canvas-wrap {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+}
+
+#storage-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.storage-crumbs {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    font-size: 12px;
+    min-height: 20px;
+}
+
+.crumb {
+    font: inherit;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    padding: 1px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.crumb:hover:not(:disabled) {
+    background: var(--hover);
+}
+
+.crumb:disabled {
+    color: var(--muted);
+    cursor: default;
+}
+
+.crumb-sep {
+    color: var(--muted);
+}
+
+.crumb-size {
+    margin-left: auto;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.storage-tip {
+    position: absolute;
+    pointer-events: none;
+    max-width: 90%;
+    padding: 4px 8px;
+    font-size: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.storage-note {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.5;
+    padding: 6px 10px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+}
+
+/* Ein abgebrochener Lauf zeigt zu kleine Summen. Das darf nicht in derselben
+   Tonlage dastehen wie die übrigen Vorbehalte. */
+.storage-note.warn {
+    color: var(--notice);
+    border-color: color-mix(in srgb, var(--notice) 40%, var(--border));
+}
+
+#storage-table tbody tr {
+    cursor: default;
+}
+
+#storage-table tbody tr.selected {
+    background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+#storage-table tbody tr.map-root td:first-child {
+    box-shadow: inset 2px 0 0 var(--disk);
+}
+
+#storage-table tbody tr.storage-rest {
+    color: var(--muted);
+}
+
+.storage-file {
+    color: var(--muted);
+}
+
+.storage-flag {
+    flex: none;
+    font-size: 10px;
+    line-height: 1;
+    cursor: help;
+}
+
+.flag-denied { color: #f87171; }
+.flag-reparse { color: var(--net); }
+.flag-compressed,
+.flag-cloud { color: var(--muted); }
+
+.share-cell {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.share-bar {
+    flex: 1;
+    min-width: 30px;
+    height: 8px;
+    border-radius: 3px;
+    background: var(--panel-2);
+    overflow: hidden;
+}
+
+.share-bar i {
+    display: block;
+    height: 100%;
+    background: var(--disk);
+    border-radius: 3px;
+}
+
+.share-text {
+    flex: none;
+    width: 48px;
+    text-align: right;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.muted-cell {
+    color: var(--muted);
+    cursor: help;
+}
+
 /* ---------- Enge Fenster ----------
 
    Das Fenster darf bis 620 × 420 verkleinert werden. Dort zählt jeder Pixel:
@@ -1689,6 +1898,15 @@ td.conn-none {
     }
 }
 
+@media (max-width: 900px) {
+    /* Nebeneinander bleibt für beides zu wenig übrig; untereinander behält der
+       Baum seine Spalten und die Karte ihre Flächen. */
+    .storage-split {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1.2fr) minmax(0, 1fr);
+    }
+}
+
 @media (max-width: 820px) {
     body {
         padding: 8px;
@@ -1713,6 +1931,22 @@ td.conn-none {
 
     .cores {
         height: 16px;
+    }
+
+}
+
+/* Schmal <em>und</em> flach: untereinander bliebe der Karte gemessen ein Streifen
+   von rund 70 Pixeln — darin ist keine Fläche mehr mit einer anderen zu
+   vergleichen, und der Baum beantwortet dieselbe Frage auch allein. Also weicht
+   sie, wie die Kernbalken und die Engine-Chips weiter oben. Nebeneinander behält
+   sie ihre volle Höhe und bleibt deshalb stehen. */
+@media (max-width: 900px) and (max-height: 760px) {
+    .storage-split {
+        grid-template-rows: minmax(0, 1fr);
+    }
+
+    .storage-map {
+        display: none;
     }
 }
 

@@ -68,6 +68,7 @@
         <button type="button" class="tab" data-view="energy">Energie</button>
         <button type="button" class="tab" data-view="connections">Verbindungen</button>
         <button type="button" class="tab" data-view="system">System</button>
+        <button type="button" class="tab" data-view="storage">Speicher</button>
         <button type="button" class="tab" data-view="logs">Logs</button>
         <button type="button" class="tab" data-view="settings">Einstellungen</button>
     </nav>
@@ -230,6 +231,43 @@
 
             <h3 class="system-heading"><span>Datenträger und Laufwerke</span></h3>
             <div id="system-drives" class="system-drives"></div>
+        </div>
+    </div>
+
+    <!-- Ansicht: Speicher -->
+    <div id="view-storage" class="view" hidden>
+        <section class="controls">
+            <select id="storage-drive" title="Welche Partition durchsucht wird. Netzlaufwerke stehen nicht zur Wahl — ein Scan über eine langsame Leitung dauert Stunden."></select>
+            <button id="storage-start" type="button" class="toggle">Scan starten</button>
+            <button id="storage-cancel" type="button" class="toggle" hidden>Abbrechen</button>
+            <label title="Zeigt zusätzlich die Dateien, die groß genug für einen eigenen Eintrag sind (ab 16 MB) — etwa hiberfil.sys oder eine Datenträgerabbildung einer virtuellen Maschine."><input id="storage-files" type="checkbox" checked> Große Dateien zeigen</label>
+            <span class="status" id="storage-status">Noch nicht durchsucht.</span>
+        </section>
+
+        <p id="storage-note" class="storage-note" hidden></p>
+
+        <div class="storage-split">
+            <div class="table-wrap storage-tree">
+                <table id="storage-table">
+                    <thead>
+                        <tr id="storage-head"></tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+                <p id="storage-empty" class="storage-empty">
+                    Noch nichts durchsucht. Laufwerk wählen und den Scan starten — je nach
+                    Datenträger dauert er einige Sekunden bis Minuten und läuft ausschließlich
+                    auf Knopfdruck.
+                </p>
+            </div>
+
+            <section class="storage-map">
+                <div id="storage-crumbs" class="storage-crumbs"></div>
+                <div class="storage-canvas-wrap">
+                    <canvas id="storage-canvas"></canvas>
+                    <div id="storage-tip" class="storage-tip" hidden></div>
+                </div>
+            </section>
         </div>
     </div>
 

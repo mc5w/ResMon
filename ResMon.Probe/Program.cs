@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.Versioning;
+using System.Text.Json;
 using ResMon.Core;
 using ResMon.Core.Config;
 using ResMon.Core.Inventory;
@@ -7,6 +8,7 @@ using ResMon.Core.Model;
 using ResMon.Core.Native;
 using ResMon.Core.Processes;
 using ResMon.Core.Sensors;
+using ResMon.Core.Storage;
 
 [assembly: SupportedOSPlatform("windows")]
 
@@ -33,6 +35,7 @@ internal static class Program
             "snapshot" => DumpSnapshot(Iterations(args, 3)),
             "paths" => DumpPaths(),
             "system" => DumpSystem(),
+            "scan" => DumpScan(args.Length > 1 ? args[1] : @"C:\"),
             _ => Help(),
         };
     }
@@ -51,6 +54,7 @@ internal static class Program
               snapshot [n]       Was der Collector ausliefert, samt Herkunft jedes CPU-Werts
               system             Systemübersicht: OS, CPU, GPU, RAM, Mainboard, Datenträger
               paths              Prüfen, welche PDH-Zählerpfade dieses System kennt
+              scan [Laufwerk]    Ordnerbelegung einer Partition messen (Vorgabe C:\)
 
             Temperaturen und der Netzverkehr pro Prozess brauchen Administratorrechte.
             """);
@@ -487,6 +491,85 @@ internal static class Program
 
         return 0;
     }
+
+    /// <summary>
+    /// Messbank für den Ordner-Scan. Beantwortet die drei Fragen, die über den
+    /// Zuschnitt entscheiden: wie lange er dauert, wie viel Müll er erzeugt und
+    /// wie groß die beschnittene Nutzlast wird.
+    /// </summary>
+    private static int DumpScan(string root)
+    {
+        if (!root.EndsWith('\\'))
+            root += '\\';
+
+        bool? seekPenalty = StorageDevice.HasSeekPenalty(root);
+        string medium = seekPenalty switch
+        {
+            true => "Festplatte (Kopfbewegung)",
+            false => "SSD",
+            null => "unbekannt",
+        };
+
+        Console.WriteLine($"Durchlaufe {root} — Datenträger: {medium}");
+        Console.WriteLine();
+
+        long allocatedBefore = GC.GetTotalAllocatedBytes(precise: false);
+        int gen2Before = GC.CollectionCount(2);
+
+        var scanner = new FolderScanner();
+        FolderScanResult result = scanner.Run(root, CancellationToken.None);
+
+        long allocated = GC.GetTotalAllocatedBytes(precise: false) - allocatedBefore;
+        int gen2 = GC.CollectionCount(2) - gen2Before;
+
+        double seconds = result.Duration.TotalSeconds;
+        long entries = result.DirectoryCount + (long)result.TotalFileCount;
+
+        Console.WriteLine($"Dauer               {seconds,10:N2} s");
+        Console.WriteLine($"Ordner              {result.DirectoryCount,10:N0}");
+        Console.WriteLine($"Dateien             {result.TotalFileCount,10:N0}");
+        Console.WriteLine($"Einträge/s          {(seconds > 0 ? entries / seconds : 0),10:N0}");
+        Console.WriteLine($"Großdateien         {result.BigFileCount,10:N0}  (ab 16 MB, eigener Eintrag)");
+        Console.WriteLine($"Nicht lesbar        {result.DeniedFolders,10:N0}  Ordner");
+        Console.WriteLine($"Abzweigungen        {result.ReparsePoints,10:N0}  nicht verfolgt");
+        Console.WriteLine();
+
+        Console.WriteLine($"Summe               {Gib(result.TotalBytes),10} GiB");
+        Console.WriteLine($"Cloud-Platzhalter   {Gib(result.CloudBytes),10} GiB  (liegen nicht auf dem Datenträger)");
+
+        long volumeUsed = result.VolumeTotalBytes - result.VolumeFreeBytes;
+        Console.WriteLine($"Windows meldet      {Gib(volumeUsed),10} GiB belegt von {Gib(result.VolumeTotalBytes)} GiB");
+
+        // Die Differenz ist eine Auskunft, kein Fehler: harte Verknüpfungen
+        // zählen doppelt (+), Cluster-Verschnitt, $MFT, verweigerte Teilbäume und
+        // Schattenkopien fehlen (−).
+        long delta = result.TotalBytes - volumeUsed;
+        Console.WriteLine($"Differenz           {Gib(delta),10} GiB");
+        Console.WriteLine();
+
+        Console.WriteLine($"Zuweisungen         {allocated / 1048576.0,10:N0} MB   Gen-2-Sammlungen: {gen2}");
+        Console.WriteLine();
+
+        IReadOnlyList<FolderSlice> payload = result.Prune();
+        string json = JsonSerializer.Serialize(payload);
+        Console.WriteLine($"Nutzlast            {payload.Count,10:N0} Knoten, {json.Length / 1024.0:N0} KB JSON (unbeschnittene Schlüssel)");
+        Console.WriteLine();
+
+        Console.WriteLine("Die 30 größten Einträge der Nutzlast:");
+        foreach (FolderSlice slice in payload
+                     .OrderByDescending(entry => entry.TotalBytes)
+                     .Take(30))
+        {
+            double percent = result.TotalBytes > 0 ? slice.TotalBytes * 100.0 / result.TotalBytes : 0;
+            string mark = slice.IsFile ? "·" : slice.Flags == FolderFlags.None ? " " : "!";
+            Console.WriteLine(
+                $"    {Gib(slice.TotalBytes),8} GiB  {percent,5:N1} %  {mark} {Truncate(result.PathOf(slice.Id), 90)}");
+        }
+
+        return 0;
+    }
+
+    private static string Gib(long bytes) => (bytes / 1073741824.0).ToString("N1", CultureInfo.CurrentCulture);
 
     private static string Format(double? value, string unit)
         => value is { } v ? $"{v,10:F1} {unit}" : $"{"—",10}";

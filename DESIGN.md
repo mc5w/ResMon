@@ -109,8 +109,9 @@ ResMon.sln
 │  ├─ Native/
 │  │  ├─ PdhQuery.cs               P/Invoke-Wrapper um pdh.dll
 │  │  ├─ CpuCache.cs               L1/L2/L3 aus der Prozessortopologie
+│  │  ├─ StorageDevice.cs          SSD oder Festplatte (Seek Penalty, §8.11)
 │  │  └─ Toolhelp.cs               Prozessbaum via CreateToolhelp32Snapshot
-│  ├─ Diagnostics/DiagnosticLog.cs Sammelstelle für gefangene Fehler (§13.5)
+│  ├─ Diagnostics/DiagnosticLog.cs Sammelstelle für gefangene Fehler (§13.6)
 │  ├─ Sensors/
 │  │  ├─ HardwareSource.cs         LHM: Temperaturen, Takt, Power, Lüfter
 │  │  ├─ CounterSource.cs          PDH: CPU, RAM
@@ -122,11 +123,16 @@ ResMon.sln
 │  │  ├─ SystemSnapshot.cs
 │  │  ├─ ProcessSample.cs
 │  │  └─ RingBuffer.cs
+│  ├─ Storage/
+│  │  ├─ FolderTree.cs             DirNode, BigFile, Auszug für die Oberfläche
+│  │  └─ FolderScanner.cs          Ordnerbelegung auf Anforderung (§8.11)
 │  ├─ Config/AppSettings.cs
 │  └─ Collector.cs                 Timer-Schleifen, Event SnapshotReady
 └─ ResMon.App                      net9.0-windows, WinExe
    ├─ OverlayWindow.xaml(.cs)
    ├─ DetailWindow.xaml(.cs)
+   ├─ FolderScanSession.cs         ein Scan-Lauf: Abbruch, Aufgabe, Ergebnis
+   ├─ PathActions.cs               Im Explorer zeigen, Pfad kopieren
    ├─ TrayIcon.cs
    ├─ AppIcon.cs                   lädt ResMon.ico für den Infobereich
    ├─ ResMon.ico                   Anwendungssymbol, erzeugt (siehe unten)
@@ -439,6 +445,61 @@ anzeigt. Sie blockiert nicht, anders als eine Testnachricht an das Fenster.
 Anders als Prozessor und Mainboard ändert sich das im Betrieb. Die Erhebung
 läuft deshalb auf Anforderung erneut; die Systemseite hat dafür eine Schaltfläche.
 
+### 8.11 Ordnerbelegung
+
+`System.IO.Enumeration.FileSystemEnumerator<T>`, eine Instanz je Verzeichnisebene.
+Unter Windows ist das **nicht** `FindFirstFileEx`, sondern `NtQueryDirectoryFile`
+mit `FILE_FULL_DIR_INFORMATION`: ein Aufruf füllt einen Puffer mit vielen
+Einträgen, und die Dateigröße steht bereits darin. Kein zweiter Zugriff je Datei,
+kein Dateihandle — deshalb sind auch `pagefile.sys` und `hiberfil.sys` kein
+Sonderfall, obwohl sie gesperrt sind.
+
+| Stellschraube | Wert | Warum |
+|---|---|---|
+| `AttributesToSkip` | `0` | Die Voreinstellung `Hidden\|System` verschluckte ausgerechnet `pagefile.sys`, `hiberfil.sys` und `ProgramData` — also gerade das, was eine volle Partition erklärt. |
+| `IgnoreInaccessible` | `false` | Nur so kommt `ContinueOnError`. Ein übersprungener Ordner wird gezählt und genannt, statt stillschweigend zu fehlen. |
+| `BufferSize` | 64 KB | Statt der voreingestellten 4 KB. Spart bei `WinSxS` und `Windows\Installer` ein Vielfaches an Aufrufen. |
+| `RecurseSubdirectories` | `false` | Die Rekursion steuert der Scanner selbst — sonst ließen sich Abzweigungen nicht aussparen und jeder Ordner bräuchte seine Summe wieder aus Pfadzeichenketten. |
+
+**Abzweigungen werden nicht verfolgt.** `C:\Users\All Users` zeigt auf
+`C:\ProgramData` und `AppData\Local\Application Data` auf sich selbst — ohne diese
+Bedingung liefe der Durchlauf im Kreis und zählte doppelt. Eingehängte Volumes
+sind ebenfalls Abzweigungen; ihr Inhalt gehört zu einer anderen Partition.
+
+**Dateien werden im Regelfall keine Knoten.** Ein volles `C:` hat gemessen 1,04
+Mio. Dateien, aber nur 291 000 Ordner. Eine Datei fließt in die Summe ihres
+Ordners ein und verschwindet; nur ab 16 MB bekommt sie einen eigenen Eintrag.
+Sonst fehlten `hiberfil.sys` und `pagefile.sys` ausgerechnet in der Ansicht, die
+erklären soll, warum die Platte voll ist.
+
+Der Baum liegt als **flaches Feld aus Strukturen** in Blöcken zu 65 536 Knoten.
+Ein Objektgraph mit einer Kinderliste je Ordner kostete das Vierfache und legte
+eine Viertelmillion Objekte in Generation 2 — eine GC-Pause von mehreren hundert
+Millisekunden in einer Anwendung, deren Zweck ein ruckelfreies Diagramm im
+Sekundentakt ist. Die Blöcke wandern nie, weil sonst ein wachsendes Feld beim
+Umkopieren die Schreibzugriffe der übrigen Worker in das verwaiste alte Feld
+laufen ließe. Der Index eines Kindes ist immer größer als der seines Elternteils;
+das Aufsummieren ist deshalb eine einzige Rückwärtsschleife statt einer Rekursion.
+Gemessener Bedarf für `C:`: rund 19 MB.
+
+**Parallelität:** ein `ConcurrentStack` und N eigene Threads mit
+`ThreadPriority.BelowNormal`, nicht `Parallel.ForEach` über die oberste Ebene —
+`C:\Windows` und `C:\Users` sind 80 % der Arbeit, eine feste Aufteilung ließe die
+übrigen Threads nach zwei Sekunden leerlaufen. Tiefensuche statt Breitensuche,
+sonst hielte der Stapel über 100 000 Pfadzeichenketten gleichzeitig. **Eigene**
+Threads, weil acht blockierte Threadpool-Threads die Nachschub-Heuristik des Pools
+auslösen und damit Aussetzer in den 1-Hz-Takt setzen würden.
+
+Der Grad hängt am Medium: **2 auf einer Festplatte, 4–8 auf einer SSD**.
+`Win32_DiskDrive.MediaType` taugt zur Unterscheidung nicht — es meldet auch für
+SSDs „Fixed hard disk media", das Feld beschreibt das Wechselmedien-Bit und nicht
+die Technik. `IOCTL_STORAGE_QUERY_PROPERTY` mit
+`StorageDeviceSeekPenaltyProperty` beantwortet die Frage direkt
+(`ResMon.Core/Native/StorageDevice.cs`).
+
+Gemeldet wird die **logische** Größe, nicht die Belegung auf dem Datenträger. Was
+das bedeutet, steht in README „Abweichungen".
+
 ## 9. Sampling-Takte
 
 | Intervall | Aufgabe |
@@ -447,9 +508,14 @@ läuft deshalb auf Anforderung erneut; die Systemseite hat dafür eine Schaltfl�
 | 2000 ms | LHM-Update: Temperaturen, Takt, Power, Lüfter, Akku |
 | 2000 ms | Prozessliste, Fensterliste und Verbindungstabelle — **nur wenn das Detailfenster geöffnet ist** |
 | 30 s | Dienst-Cache aktualisieren |
+| — | Ordnerbelegung (§8.11): **kein Takt**, ausschließlich auf Knopfdruck |
 
 Der Monitor darf nicht selbst zum Lastverursacher werden. Prozess-Enumeration ist
 der mit Abstand teuerste Teil und wird deshalb bedarfsgesteuert ausgeführt.
+
+Der Ordner-Scan ist die einzige Datenquelle **ganz ohne** Takt. Er kostet je nach
+Medium Sekunden bis Minuten und wird deshalb nie von selbst angestoßen, nie
+wiederholt und beim Schließen des Detailfensters abgebrochen.
 
 ## 10. Ringpuffer
 
@@ -543,6 +609,31 @@ durchlässig. Deshalb gilt:
 | `openDetail` | — | Detailfenster öffnen |
 | `setOpacity` | `value: 0..1` | Fenster-Deckkraft |
 | `close` | — | Anwendung beenden |
+| `startFolderScan` | `path: "C:\\"` | Ordner-Scan starten (§8.11). Der Host nimmt **nur Laufwerkswurzeln** an. |
+| `cancelFolderScan` | — | Laufenden Scan abbrechen |
+| `expandFolder` | `scan`, `node` | Kinder eines Knotens nachfordern |
+| `openFolder` | `scan`, `node` | Im Explorer zeigen |
+| `copyFolderPath` | `scan`, `node` | Pfad in die Zwischenablage |
+
+Nach dem Start reist **nie wieder ein Pfad nach innen**: alles Weitere läuft über
+ganzzahlige Kennungen in einen Baum, den der Host selbst gebaut hat. Die
+Laufwerkswurzel wird gegen `DriveInfo.GetDrives()` geprüft; Netzlaufwerke bleiben
+draußen, ein Scan über eine langsame Leitung ist eine Falle und keine Funktion.
+Sie stehen deshalb auch nicht in der Auswahl — dafür trägt `VolumeInfo` die
+Laufwerksart mit. Ein Eintrag, der beim Anklicken jedes Mal abgelehnt würde, wäre
+schlechter als keiner. Verglichen wird ohne abschließenden Trennstrich: die
+Systemübersicht führt die Laufwerke als „C:", `DriveInfo` nennt sie „C:\".
+Die `scan`-Kennung verhindert, dass ein Nachschlag aus einem überholten Lauf in
+einen anderen Baum zeigt.
+
+Der Rückweg kennt den Nachrichtentyp `scan` mit den Phasen `running`, `done`,
+`children`, `cancelled` und `error`. Er reist **nicht** in der Messnutzlast mit:
+die ist darauf gebaut auszulassen, was sich nicht geändert hat, ein Scan ist
+stoßweise und unverwandt, und bis zu eine Sekunde Verzug auf den Übergang
+„fertig" fühlte sich kaputt an. Der Fortschritt wird **geholt, nicht geschickt** —
+der Scanner hält flüchtige Zähler, ein `DispatcherTimer` liest sie viermal je
+Sekunde ab. Ein Rückruf je Ordner wären 290 000 Delegataufrufe durch den
+Synchronisierungskontext.
 
 Ein Command zum Beenden von Prozessen ist bewusst nicht enthalten.
 
@@ -551,8 +642,9 @@ Ein Command zum Beenden von Prozessen ist bewusst nicht enthalten.
 Normales WPF-Fenster mit WebView2. Tabelle in HTML; Sortierung, Filterung,
 Gruppierung und Aggregation laufen vollständig in JavaScript.
 
-Sechs Reiter: **Prozesse**, **Energie**, **Verbindungen**, **System**, **Logs**,
-**Einstellungen**. Die Kacheln über den Reitern gelten für alle.
+Sieben Reiter: **Prozesse**, **Energie**, **Verbindungen**, **System**,
+**Speicher**, **Logs**, **Einstellungen**. Die Kacheln über den Reitern gelten für
+alle.
 
 **Spaltenbreiten** sind in allen Tabellen an der rechten Kante der
 Spaltenüberschrift ziehbar, Doppelklick setzt eine Spalte zurück. Solange nichts
@@ -685,7 +777,55 @@ Kernelfunktion liefert jeden Cache einzeln, samt der Trennung in Daten- und
 Befehlscache, die genau bei L1 existiert: „384 KB (6 × 32 KB Daten + 6 × 32 KB
 Befehle)". WMI bleibt Rückfallebene für L2 und L3.
 
-### 13.5 Logs
+### 13.5 Speicher
+
+Beantwortet die Frage, die der System-Reiter offen lässt: nicht *dass* die
+Partition eng wird, sondern **wo** der Platz liegt. Der Durchlauf (§8.11) startet
+ausschließlich auf Knopfdruck; vorgewählt ist das vollste Laufwerk, denn deswegen
+ist man hier.
+
+Nebeneinander stehen **Baum und Kachelkarte** — der Baum trägt die Arbeit, die
+Karte den Blick. Beide zeigen dieselben Knoten, die Auswahl ist gekoppelt: ein
+Klick in die Karte markiert die Zeile und klappt ihre Vorfahren auf, ein
+Doppelklick macht den Knoten zur neuen Kartenwurzel. Eines allein genügte nicht.
+Die Karte beantwortet „wo liegt der Platz" in einem Blick, kann aber weder
+sortieren noch durchsuchen und verschluckt alles Kleine; der Baum nennt Pfad und
+Zahl genau, verlangt dafür aber, Ebene für Ebene hinabzusteigen.
+
+**Baum:** je Ebene absteigend sortiert, mit Anteilsbalken. Der Balken bezieht sich
+auf die **Wurzel des Scans**, nicht auf den Elternordner — sonst stünde in jedem
+Zweig 100 % und die Zahl sagte nichts. Eine Zeile „übrige" fängt auf, was keine
+eigene Zeile hat: die kleinen Dateien im Ordner und die Kinder, die für den Auszug
+zu klein waren. Damit gehen die Prozente auf.
+
+**Karte:** Squarified Treemap nach Bruls, Huizing und van Kesteren — die Kinder
+werden zeilenweise verteilt, und eine Zeile wird genau so lange gefüllt, wie sich
+das Seitenverhältnis der Kacheln dadurch verbessert. Ohne das entstünden lange
+dünne Streifen, deren Flächen niemand vergleichen kann. Verschachtelt wird nach
+**Kachelgröße, nicht nach Tiefe**: Ketten wie `Users → Stefan → AppData`
+verbrauchen drei Ebenen, ohne etwas zu zeigen, und ausgerechnet darunter liegt
+meist die Antwort. Weil jede Ebene 4 px Breite und 20 px Höhe abzieht, endet die
+Rekursion von selbst.
+
+Die Farben kommen aus den Schema-Variablen und wandern mit der Tiefe in Richtung
+Textfarbe — im dunklen Schema wird es dadurch heller, im hellen dunkler, und der
+Kontrast bleibt in beiden erhalten. Fest verdrahtet ist keine.
+
+Unter der Leiste steht, was die Zahlen einschränkt: ein **abgebrochener** Lauf
+(dessen halbfertige Zweige zu klein dastehen), der Anteil in Cloud-Platzhaltern
+und die Differenz zu der Belegung, die Windows meldet. Einzelne Ordner tragen ein
+Zeichen für nicht lesbar, Abzweigung, komprimiert oder Cloud. Ohne diese Angaben
+wären die Zahlen darüber falsch zu lesen.
+
+Kontextmenü auf Zeile und Kachel: **Im Explorer öffnen** und **Pfad kopieren**.
+Gelöscht wird bewusst nicht aus der Anwendung heraus — sie läuft erhöht (§14), ein
+Fehlgriff träfe also auch Systemordner, ohne Papierkorb und ohne Rückgängig. Der
+Explorer kann beides besser.
+
+Bei schmalem **und** flachem Fenster weicht die Karte: untereinander blieben ihr
+rund 70 Pixel, darin ist keine Fläche mehr mit einer anderen zu vergleichen.
+
+### 13.6 Logs
 
 Beantwortet eine einzige Frage: was wird gerade **nicht** gelesen, und warum.
 Jeder Eintrag nennt Einstufung (fällt aus / eingeschränkt / Hinweis), Folge und
