@@ -46,7 +46,7 @@ Tray-Icon. Bedienung:
 - **Details** — Prozessfenster öffnen (erst dann laufen Prozess-Enumeration und ETW)
 - **Tray-Menü** — Deckkraft, sichtbare Zeilen, Klick-Durchlässigkeit, Autostart, Beenden
 
-Das Detailfenster hat sieben Reiter:
+Das Detailfenster hat acht Reiter:
 
 | Reiter | Inhalt |
 |---|---|
@@ -55,6 +55,7 @@ Das Detailfenster hat sieben Reiter:
 | **Verbindungen** | Übersicht der offenen Ports und darunter die vollständige TCP/UDP-Tabelle |
 | **System** | Betriebssystem, Laufzeit, CPU samt Cache-Ebenen, Grafik, Arbeitsspeicher, Mainboard, Geräte und Datenträger |
 | **Speicher** | Welche Ordner eine Partition füllen — sortierter Baum und Kachelkarte nebeneinander |
+| **System-Start** | Woran der Systemstart hängt: Phasen, gemessene Startkette, Befunde mit Fundstelle, Autostart-Einträge, Wartekette |
 | **Logs** | Was gerade *nicht* ausgelesen werden kann und warum — Zählersätze, Sensortreiber, gefangene Fehler |
 | **Einstellungen** | Farbschema, Deckkraft und Größe des Overlays, sichtbare Zeilen, Reihen des Diagramms |
 
@@ -79,6 +80,36 @@ stehen also mit in der Liste. Alles Kleinere zählt in die Summe seines Ordners.
 
 Zu lesen ist das Ergebnis mit den Vorbehalten, die unter der Leiste stehen: siehe
 den nächsten Abschnitt.
+
+### Reiter „System-Start"
+
+Beantwortet nicht „welche Programme starten mit" — das zeigt der Task-Manager
+auch — sondern **welches davon den Start aufgehalten hat und um wie viele
+Sekunden**.
+
+Die tragende Quelle ist `Microsoft-Windows-Shell-Core/Operational`. Der Explorer
+schreibt dort zu jedem Autostart-Befehl ein Start- und ein Ende-Ereignis mit
+Zeitstempel und vergebener PID. Der entscheidende Befund steckt in den
+Zeitstempeln: das Ende eines Befehls trägt dieselbe Zeit wie der Start des
+nächsten. Der Explorer arbeitet also **nacheinander** ab — die Dauer eines Glieds
+ist damit die Wartezeit aller folgenden, und ein hängender Eintrag ist als langer
+Balken sichtbar, ohne dass man raten muss.
+
+Dazu kommen Windows' eigene Startmessung (Phasenaufteilung in Millisekunden), die
+Zeitlimits des Dienststeuerungs-Managers — `Das Zeitlimit (90000 ms) wurde beim
+Verbindungsversuch mit dem Dienst … erreicht` ist die Zeile, die man bei einem
+unerklärlich langen Start sucht — sowie Netlogon, Gruppenrichtlinien und
+Benutzerprofildienst.
+
+Jeder Befund nennt Kosten in Sekunden, Erklärung und **Fundstelle**. Ein Befund
+ohne Fundstelle wäre eine Behauptung. **Bericht kopieren** legt alles als Text in
+die Zwischenablage — wer ein Startproblem untersucht, sitzt selten vor dem
+betroffenen Rechner.
+
+Darunter beantworten Wartekettenanalyse (`GetThreadWaitChain`, dieselbe Funktion
+wie im Task-Manager) und die systemweite Handle-Tabelle die Frage für den
+laufenden Betrieb: worauf wartet ein Prozess gerade, wer hält ihn, und was hat er
+offen.
 
 Bedienung der Tabellen:
 
@@ -123,6 +154,8 @@ ResMon.Probe\bin\x64\Release\net9.0\ResMon.Probe.exe sensors
 | `processes [n]` | Top-15-Prozesse nach CPU inklusive Dienstauflösung |
 | `paths` | Welche der benötigten PDH-Zählerpfade dieses System kennt |
 | `scan [Laufwerk]` | Ordnerbelegung messen: Dauer, Einträge/s, Zuweisungen, Größe der Nutzlast und die 30 größten Pfade |
+| `startup` | Startanalyse als Text: Phasen, Startkette mit Dauern, Befunde, Inventar, Einschränkungen |
+| `boottrace [datei]` | ETW-Startaufzeichnung auswerten — ohne Argument die, die Windows bei jedem Hochfahren selbst anlegt (**erhöht ausführen**) |
 
 `scan` ist zugleich die Messbank für den Reiter „Speicher" — Laufzeit,
 Speicherbedarf und die Wirkung der Schwellwerte lassen sich damit prüfen, ohne die
@@ -218,6 +251,50 @@ entgegennimmt, und der Host nimmt ausschließlich Laufwerkswurzeln an, die er ge
 `DriveInfo.GetDrives()` prüft. Alles Weitere läuft über ganzzahlige Kennungen in
 einen Baum, den der Host selbst gebaut hat: die Oberfläche kann ihn also nicht
 dazu bringen, einen beliebigen Pfad abzulaufen.
+
+Für den Reiter „System-Start" sind sechs weitere hinzugekommen —
+`requestStartup`, `bootTrace`, `analyzeTrace`, `openTrace`, `requestHandles` und
+`inspectProcess`. Auch hier reist **kein Pfad nach innen**: welche Aufzeichnung
+ausgewertet wird, entscheidet ein Schlüsselwort (`windows` oder `own`), und den
+Dateipfad kennt allein der Host.
+
+## Was die Startanalyse nicht messen kann
+
+Der Reiter „System-Start" liest aus, was Windows über den letzten Start
+aufgeschrieben hat. Fünf Dinge stehen dort nicht:
+
+1. **Rechenzeit je Autostart-Eintrag.** Die Ereignisprotokolle kennen nur Anfang
+   und Ende. Alles dazwischen sieht nur eine ETW-Ablaufverfolgung. Windows legt
+   gelegentlich selbst eine an (`BootPerfDiagLogger.etl`, ohne Neustart
+   auswertbar), aber mit zwei Vorbehalten: sie enthält **keine
+   Profilablaufverfolgung** — daraus kommen Datenträgerzugriffe und
+   Startzeitpunkte, keine Rechenzeit —, und sie stammt **nicht zwangsläufig vom
+   letzten Start**. Die Startdiagnose läuft nicht bei jedem Hochfahren; auf der
+   Referenzmaschine war die Datei ein Jahr alt. ResMon prüft die Dateizeit gegen
+   den Einschaltzeitpunkt und sagt es, wenn sie nicht passt. Für belastbare
+   Rechenzeiten braucht es eine eigene Aufzeichnung — und auch dann ist die Zahl
+   eine Schätzung aus Abtastungen, keine Messung.
+2. **Was vor dem Anmelden hängt, ist nur teilweise zuzuordnen.** Ein
+   Dienst-Zeitlimit steht mit Namen und Sekunden im Protokoll; eine
+   Netzwerkkarte, die 20 Sekunden auf DHCP wartet, oft nicht.
+3. **Der Schnellstart verfälscht den Vergleich.** Windows lädt die Kernelsitzung
+   aus `hiberfil.sys` zurück, statt sie neu aufzubauen; Treiber- und
+   Dienstphasen fallen dadurch kürzer aus als bei einem Kaltstart. Die
+   Startart steht deshalb als eigene Kachel da, und die Einschränkung wird
+   ausdrücklich genannt.
+4. **Die Startkette rollt aus dem Protokoll heraus.** `Shell-Core/Operational`
+   ist ein Ringpuffer. Wer den Rechner seit dem Anmelden lange laufen ließ und
+   viel installiert hat, findet die Einträge des letzten Starts nicht mehr.
+5. **Herausgeber ≠ Signatur.** Die Spalte „Herausgeber" kommt aus der
+   Dateiversion, nicht aus einer geprüften Signatur. Sie sagt, was die Datei über
+   sich behauptet. Eine Signaturprüfung wäre eine andere Aussage und wird hier
+   bewusst nicht angedeutet — die meisten Windows-Dateien sind katalogsigniert
+   und trügen sonst fälschlich „nicht signiert".
+
+Ausdrücklich nicht getan: den Rechner selbst neu zu starten, wenn eine
+Startaufzeichnung scharfgestellt ist. Die Anwendung richtet sie ein, sagt es, und
+wartet. Ein Überwachungswerkzeug, das den Rechner neu startet, ist eines, das man
+nicht laufen lassen kann.
 
 ## CPU-Temperatur und Speicherintegrität
 

@@ -69,6 +69,7 @@
         <button type="button" class="tab" data-view="connections">Verbindungen</button>
         <button type="button" class="tab" data-view="system">System</button>
         <button type="button" class="tab" data-view="storage">Speicher</button>
+        <button type="button" class="tab" data-view="startup">System-Start</button>
         <button type="button" class="tab" data-view="logs">Logs</button>
         <button type="button" class="tab" data-view="settings">Einstellungen</button>
     </nav>
@@ -269,6 +270,126 @@
                 </div>
             </section>
         </div>
+    </div>
+
+    <!-- Ansicht: System-Start -->
+    <div id="view-startup" class="view" hidden>
+      <div class="startup-scroll">
+        <section class="controls">
+            <button id="startup-refresh" type="button" class="toggle"
+                    title="Liest die Ereignisprotokolle, die Registry und die Aufgabenplanung neu. Dauert je nach Rechner einige Sekunden und läuft ausschließlich auf Knopfdruck.">Neu erheben</button>
+            <button id="startup-copy" type="button" class="toggle"
+                    title="Legt den vollständigen Befund als Text in die Zwischenablage — zum Weitergeben an jemanden, der den Rechner nicht vor sich hat.">Bericht kopieren</button>
+            <span class="status" id="startup-status">Wird erhoben …</span>
+        </section>
+
+        <!-- Kacheln: was Windows selbst über den letzten Start gemessen hat -->
+        <section class="tiles startup-tiles" id="startup-tiles"></section>
+
+        <!-- Phasenband -->
+        <section class="panel" id="startup-phases-panel" hidden>
+            <h3 class="startup-heading">
+                <span>Wo die Zeit geblieben ist</span>
+                <span class="startup-hint">Windows misst jeden Start selbst — Ereignis 100 der Startleistungsüberwachung.</span>
+            </h3>
+            <div class="phase-band" id="startup-phases"></div>
+            <div class="phase-legend" id="startup-phase-legend"></div>
+        </section>
+
+        <!-- Befunde -->
+        <section class="panel">
+            <h3 class="startup-heading">
+                <span>Befunde — was den Start aufgehalten hat</span>
+                <label class="startup-toggle" title="Blendet auch die Hinweise ein, die nichts kosten, aber in Ordnung gebracht gehören — verwaiste Einträge etwa."><input id="startup-all-findings" type="checkbox"> Auch Hinweise zeigen</label>
+            </h3>
+            <div class="finding-list" id="startup-findings"></div>
+            <p class="startup-empty" id="startup-findings-empty" hidden>
+                Nichts gefunden. Weder in den Zeitlimits des Dienststeuerungs-Managers noch
+                in der Startkette steht etwas Auffälliges.
+            </p>
+        </section>
+
+        <!-- Startkette -->
+        <section class="panel" id="startup-chain-panel">
+            <h3 class="startup-heading">
+                <span>Startkette</span>
+                <span class="startup-hint">Der Explorer arbeitet die Einträge nacheinander ab — die Länge eines Balkens ist die Wartezeit aller folgenden.</span>
+            </h3>
+            <div class="gantt" id="startup-chain"></div>
+            <p class="startup-empty" id="startup-chain-empty" hidden>
+                Keine Startkette aufgezeichnet. Entweder ist das Protokoll
+                „Shell-Core/Operational“ abgeschaltet, oder die Einträge des letzten
+                Anmeldens sind bereits herausgerollt.
+            </p>
+        </section>
+
+        <!-- Autostart-Einträge -->
+        <section class="panel">
+            <h3 class="startup-heading"><span>Autostart-Einträge</span></h3>
+            <div class="controls startup-controls">
+                <input id="startup-filter" type="search" placeholder="Name, Herausgeber, Befehl oder Pfad filtern …" autocomplete="off" spellcheck="false">
+                <label title="Automatisch startende Dienste sind auf einem Windows-Rechner rund hundert Stück und würden die Liste erdrücken. Sie starten außerdem vor der Anmeldung und halten die Autostart-Kette nicht auf."><input id="startup-services" type="checkbox"> Dienste einbeziehen</label>
+                <label title="Zeigt auch, was eingetragen, aber abgeschaltet ist."><input id="startup-disabled" type="checkbox" checked> Abgeschaltete zeigen</label>
+                <label title="Zeigt nur Einträge mit einer Auffälligkeit — fehlende Datei, leerer Befehl, Netzpfad."><input id="startup-issues" type="checkbox"> Nur Auffällige</label>
+                <span class="status" id="startup-count">–</span>
+            </div>
+            <div class="table-wrap startup-table-wrap">
+                <table id="startup-entries">
+                    <thead><tr id="startup-entries-head"></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Wartekette und Handles -->
+        <section class="panel">
+            <h3 class="startup-heading">
+                <span>Wartekette und Handles</span>
+                <span class="startup-hint">Was beim letzten Start hängen blieb, steht oben im Protokoll. Was <em>jetzt</em> hängt, steht nirgends — nur hier.</span>
+            </h3>
+            <div class="controls startup-controls">
+                <button id="handles-refresh" type="button" class="toggle"
+                        title="Zählt die Handles aller Prozesse in einem einzigen Aufruf. Ein Prozess, dessen Zahl über Stunden nur steigt, hat ein Leck.">Handles zählen</button>
+                <span class="status" id="handles-status">Noch nicht gezählt.</span>
+            </div>
+            <div class="inspect-split">
+                <div class="table-wrap inspect-list">
+                    <table id="handles-table">
+                        <thead><tr id="handles-head"></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                    <p class="startup-empty" id="handles-empty">
+                        Noch nicht gezählt. Ein Klick auf eine Zeile fragt danach, worauf der
+                        Prozess gerade wartet und welche Dateien er offen hat.
+                    </p>
+                </div>
+                <div class="inspect-detail" id="inspect-detail">
+                    <p class="startup-empty">Keine Zeile gewählt.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Startaufzeichnung -->
+        <section class="panel">
+            <h3 class="startup-heading">
+                <span>Startaufzeichnung</span>
+                <span class="startup-hint">Der einzige Weg zu echten CPU- und E/A-Kosten je Startvorgang — muss vor dem Neustart eingerichtet werden.</span>
+            </h3>
+            <div id="trace-body" class="trace-body"></div>
+            <div class="table-wrap trace-table-wrap" id="trace-summary-wrap" hidden>
+                <table id="trace-summary">
+                    <thead><tr id="trace-summary-head"></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Einschränkungen -->
+        <section class="panel" id="startup-limits-panel" hidden>
+            <h3 class="startup-heading"><span>Was die Zahlen einschränkt</span></h3>
+            <ul class="startup-limits" id="startup-limits"></ul>
+        </section>
+      </div>
     </div>
 
     <!-- Ansicht: Logs -->

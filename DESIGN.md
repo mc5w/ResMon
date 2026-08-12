@@ -111,7 +111,7 @@ ResMon.sln
 │  │  ├─ CpuCache.cs               L1/L2/L3 aus der Prozessortopologie
 │  │  ├─ StorageDevice.cs          SSD oder Festplatte (Seek Penalty, §8.11)
 │  │  └─ Toolhelp.cs               Prozessbaum via CreateToolhelp32Snapshot
-│  ├─ Diagnostics/DiagnosticLog.cs Sammelstelle für gefangene Fehler (§13.6)
+│  ├─ Diagnostics/DiagnosticLog.cs Sammelstelle für gefangene Fehler (§13.7)
 │  ├─ Sensors/
 │  │  ├─ HardwareSource.cs         LHM: Temperaturen, Takt, Power, Lüfter
 │  │  ├─ CounterSource.cs          PDH: CPU, RAM
@@ -126,6 +126,21 @@ ResMon.sln
 │  ├─ Storage/
 │  │  ├─ FolderTree.cs             DirNode, BigFile, Auszug für die Oberfläche
 │  │  └─ FolderScanner.cs          Ordnerbelegung auf Anforderung (§8.11)
+│  ├─ Startup/                     Analyse des Systemstarts (§8.12)
+│  │  ├─ StartupModel.cs           Eintrag, Kettenglied, Phase, Befund, Bericht
+│  │  ├─ StartupInventory.cs       Run-Keys, Startordner, Aufgaben, Dienste, Store-Apps
+│  │  ├─ ShellLink.cs              Ziel einer .lnk aus der Datei lesen
+│  │  ├─ StartupEvents.cs          Ereignisprotokolle, Felder statt Meldungstext
+│  │  ├─ BootChain.cs              Gemessene Startkette aus Shell-Core
+│  │  ├─ BootPerformanceReader.cs  Windows' eigene Startmessung
+│  │  ├─ StartupFindings.cs        Die bekannten Muster und ihre Belege
+│  │  ├─ BootTrace.cs              ETW-Aufzeichnung scharfstellen und einsammeln
+│  │  ├─ BootTraceAnalyzer.cs      ETL auswerten: CPU und E/A je Prozess
+│  │  └─ StartupAnalyzer.cs        Klammer um alles, auf Anforderung
+│  ├─ Native/
+│  │  ├─ WaitChain.cs              GetThreadWaitChain: worauf ein Thread wartet
+│  │  ├─ HandleTable.cs            Systemweite Handle-Tabelle, offene Dateien
+│  │  └─ ProcessPrivileges.cs      SeDebugPrivilege einschalten
 │  ├─ Config/AppSettings.cs
 │  └─ Collector.cs                 Timer-Schleifen, Event SnapshotReady
 └─ ResMon.App                      net9.0-windows, WinExe
@@ -500,6 +515,180 @@ die Technik. `IOCTL_STORAGE_QUERY_PROPERTY` mit
 Gemeldet wird die **logische** Größe, nicht die Belegung auf dem Datenträger. Was
 das bedeutet, steht in README „Abweichungen".
 
+### 8.12 Systemstart
+
+Der Task-Manager zeigt zum Autostart eine Liste und eine Einstufung in drei
+Stufen „Startauswirkung". Beides beantwortet die eigentliche Frage nicht: *warum*
+dauert der Start so lange. Windows misst dafür genug — nur an fünf verschiedenen
+Stellen, von denen keine für sich allein etwas taugt.
+
+| Was | Quelle | Was sie beiträgt |
+|---|---|---|
+| Startdauer und Phasen | `Microsoft-Windows-Diagnostics-Performance/Operational`, Ereignis 100 | Die Aufteilung des Starts in Kernel, Treiber, Geräte, Prefetch, SMSS, kritische Dienste, Profil, Explorer und Nachlauf — in Millisekunden. Dieselbe Grundlage, aus der der Task-Manager seine drei Stufen bildet |
+| Auffällige Einzelposten | dasselbe Protokoll, 101 – 109 | Anwendung, Treiber, Dienst oder Gerät, das länger als üblich brauchte, mit `TotalTime` und `DegradationTime` |
+| **Startkette** | `Microsoft-Windows-Shell-Core/Operational`, 9707/9708, 62408/62409, 62170/62171 | Start- und Endzeitstempel **je Autostart-Befehl**, samt vergebener PID |
+| Dienst-Zeitlimits | System-Protokoll, 7009 und 7011 | Die gewartete Zeit als Zahl im Ereignis — 30 000 oder 90 000 ms, in denen der Start stillsteht |
+| Umfeld | System-Protokoll 5719, GroupPolicy 8001/8002, Benutzerprofildienst 1/2 | Domänenanmeldung, Richtlinienverarbeitung, Profilladezeit — im Firmennetz die üblichen Verdächtigen |
+
+**Die Startkette ist der Kern.** Ihr entscheidender Befund steckt nicht in den
+Ereignissen selbst, sondern in ihren Zeitstempeln: das Ende-Ereignis eines
+Befehls trägt denselben Zeitstempel wie das Start-Ereignis des nächsten. Der
+Explorer arbeitet die Autostart-Einträge also **nacheinander** ab, und die Dauer
+eines Glieds ist damit nicht nur seine eigene Startzeit, sondern die Wartezeit
+aller folgenden. Ein Eintrag, dessen Startaufruf hängt, ist als langer Balken
+sichtbar, ohne dass man raten muss. Das ist die einzige Stelle im System, an der
+sich das rückwirkend nachlesen lässt.
+
+**Gelesen wird ausschließlich über `EventData`, nie über den angezeigten Text.**
+Der ist lokalisiert und bände die Auswertung an die Systemsprache — dieselbe
+Überlegung wie bei `PdhAddEnglishCounterW` in §8.1. Die Felder tragen feste
+englische Namen. Anbieter mit Manifest benennen sie (`Command`, `TotalTime`),
+die alten Quellen — allen voran der Dienststeuerungs-Manager — schreiben
+`param1`, `param2`; ganz alte lassen den Namen weg, dann zählt die Position.
+Alle drei Formen werden abgefragt.
+
+**Zwei Protokolle sind zugriffsgeschützt**, `Diagnostics-Performance` und
+`GroupPolicy`. Die Anwendung läuft erhöht (§14) und kommt heran; trifft sie den
+Fall dennoch an, wird er als Einschränkung gemeldet statt als leerer Abschnitt.
+Geprüft wird das mit einem **echten Lesezugriff**: der naheliegende Weg über
+`EventLogConfiguration` taugt nicht, weil Windows die Kanaldefinition auch
+unerhöht herausgibt — gemessen meldet sie für beide gesperrten Protokolle Erfolg,
+während der erste `ReadEvent` wirft.
+
+#### Inventar
+
+Erfasst werden dieselben Quellen wie bei Autoruns: Run- und RunOnce-Schlüssel
+beider Zweige samt `WOW6432Node`, beide Startordner, geplante Aufgaben mit
+Anmelde- oder Startauslöser, Dienste mit Starttyp „Automatisch" und die
+Startaufgaben von Store-Anwendungen. Der Task-Manager zeigt davon die Hälfte;
+geplante Aufgaben und Dienste laufen genauso beim Start an und sind
+erfahrungsgemäß die teureren. Sie stehen deshalb dabei, aber getrennt benannt —
+ein Dienst hält den Desktop anders auf als ein Run-Eintrag, und eine Aufgabe mit
+einer Stunde Verzögerung hält ihn gar nicht auf.
+
+Geplante Aufgaben werden aus den XML-Dateien unter `%windir%\System32\Tasks`
+gelesen statt über die COM-Schnittstelle: Auslöser und Verzögerung stehen dort im
+Klartext, und es spart eine Interop-Schicht für Daten, die ohnehin als XML
+vorliegen. Der Ordner ist nur erhöht lesbar.
+
+**Nicht jede Aufgabe startet ein Programm.** Der überwiegende Teil der
+Windows-eigenen ruft über einen `ComHandler` eine DLL im Kontext des
+Aufgabenplaners auf und hat gar kein `Exec`-Element. Solche Aufgaben durch die
+Befehlszeilen-Auswertung zu schicken hieße, sie als „leerer Eintrag" zu melden —
+auf der Referenzmaschine waren das **einundzwanzig von sechsundzwanzig
+Befunden**, und die fünf echten gingen darin unter. Sie bekommen deshalb die
+Klassenkennung des Handlers als Befehl und den Vermerk „COM-Handler" statt einer
+Auffälligkeit.
+
+**Ein Befehl ohne Verzeichnis ist keine fehlende Datei.** `winget.exe` etwa liegt
+als Ausführungsalias unter `WindowsApps` und wird über den Suchpfad gefunden;
+`File.Exists` prüft dagegen relativ zum Arbeitsverzeichnis und meldet
+zuverlässig „fehlt". Solche Befehle werden erst im Suchpfad gesucht; bleibt es
+dabei, dass sie nicht auffindbar sind, steht die Zelle **leer** statt einen
+Befund zu behaupten — eine unbeantwortbare Frage ist keine Antwort.
+
+**Der Zustand eines Eintrags steht nicht am Eintrag.** Er liegt unter
+`Explorer\StartupApproved` als zwölf Byte: das erste trägt den Zustand, die
+Bytes 4 bis 11 eine FILETIME. Für die Auswertung des ersten Bytes kursieren
+mehrere Regeln; nachprüfbar ist sie am Protokoll. Auf der Referenzmaschine wurden
+genau die Einträge mit **gerader** Zahl (2 und 6) vom Explorer ausgeführt und die
+mit ungerader (1 und 3) nicht — gerade heißt aktiv. Der Zeitstempel ist der
+Moment des Abschaltens und beantwortet die Frage „habe ich das selbst
+abgeschaltet oder war das ein Programm".
+
+Die Befehlszeile wird an der **ersten Endung `.exe`** zerlegt, nicht am ersten
+Leerzeichen und nicht an der ersten existierenden Datei. Ein Schnitt am
+Leerzeichen zerlegt `Docker Desktop.exe` in der Mitte; eine Suche nach der ersten
+existierenden Datei findet für eine deinstallierte Anwendung gar nichts und
+meldet dann `C:\Program` als fehlende Datei statt des tatsächlichen Pfades. Die
+Endung trifft beide Fälle und schneidet zugleich bei
+`Update.exe --processStart Discord.exe` an der richtigen der beiden Nennungen.
+
+#### Wartekette und Handles
+
+Was beim letzten Start in ein Zeitlimit lief, steht im Protokoll. Was *jetzt
+gerade* hängt, steht nirgends: ein Prozess mit 0 % CPU-Last kann beschäftigt sein
+oder blockiert, und von außen sieht beides gleich aus. `GetThreadWaitChain`
+(`Native/WaitChain.cs`) — dieselbe Funktion hinter „Wartekette analysieren" im
+Task-Manager — sagt, worauf ein Thread wartet und wer ihn hält, über
+Prozessgrenzen hinweg und quer durch kritische Abschnitte, Mutexe, ALPC-Anfragen
+und COM-Aufrufe. Ein Ring in der Kette ist eine echte Verklemmung.
+
+Die Handle-Tabelle kommt aus einem einzigen
+`NtQuerySystemInformation(SystemExtendedHandleInformation)`: ein Aufruf liefert
+alle Handles des Systems mit besitzender PID und Objektart, es gibt also keinen
+Aufruf je Prozess. Die Zuordnung von Objektartkennung zu Name geschieht
+**durch Ausprobieren** — je gesuchter Art wird ein Objekt selbst angelegt und
+nachgeschlagen, welche Kennung der eigene Prozess dafür bekam. Die Kennungen sind
+nicht festgelegt und verschieben sich zwischen Windows-Fassungen; sie über
+`ObjectTypesInformation` sauber aufzulösen hieße, eine Kette von Strukturen mit
+variabler Länge und eigener Ausrichtungsregel zu lesen, die bei jeder Änderung
+still falsche Namen liefern kann.
+
+Beim Auflösen der Dateinamen lauert die bekannteste Falle dieser Schnittstelle:
+`NtQueryObject` blockiert **für immer**, wenn der Handle auf eine synchrone Named
+Pipe zeigt, deren Gegenstelle nicht liest. Process Explorer läuft dafür in einen
+eigenen Thread und bricht ihn nach einem Zeitlimit ab. Hier wird der Fall
+stattdessen vorher ausgeschlossen: `GetFileType` verrät ohne Blockierung, ob ein
+Handle eine Datei, eine Pipe oder ein Zeichengerät ist, und nur bei einer echten
+Datei wird nach dem Namen gefragt. Das ist kein Zeitlimit, sondern der Verzicht
+auf die Frage, die hängen bleibt — und spart den Thread, den .NET ohnehin nicht
+sicher abbrechen könnte.
+
+#### Was in keinem Protokoll steht
+
+Was ein einzelner Autostart-Vorgang an **Rechenzeit und Datenträgerzugriffen**
+gekostet hat. Die Protokolle kennen nur Anfang und Ende; dazwischen sieht nur
+eine Ablaufverfolgung. Zwei Quellen kommen infrage, und die erste ist die
+überraschende:
+
+1. **Windows zeichnet den Start gelegentlich selbst auf.** Der
+   Diagnoserichtliniendienst legt
+   `%windir%\System32\WDI\LogFiles\BootPerfDiagLogger.etl` an — dieselbe Spur,
+   aus der auch die Ereignisse 100 bis 110 entstehen. Sie ist ohne Neustart und
+   ohne Vorbereitung da; der Ordner ist nur erhöht lesbar, und die Datei ist in
+   Benutzung und muss vor dem Lesen kopiert werden.
+
+   **Sie stammt nicht zwangsläufig vom letzten Start.** Die Startdiagnose läuft
+   nicht bei jedem Hochfahren, sondern wenn sie anspringt — auf der
+   Referenzmaschine war die Datei ein volles Jahr alt, Sitzungszeitstempel und
+   Dateizeit stimmten darin überein. Wer das nicht bemerkt, sucht die Ursache
+   eines heutigen Problems in Zahlen, die es damals noch nicht gab. Die Dateizeit
+   wird deshalb gegen den Einschaltzeitpunkt aus §8.9 geprüft, und passt sie
+   nicht, sagt die Oberfläche das als Erstes.
+2. **Eine eigene Aufzeichnung** über `wpr.exe -addboot` / `-stopboot`
+   (`Startup/BootTrace.cs`). Ausführlicher, kostet aber einen Neustart und
+   mehrere hundert Megabyte. `wpr.exe` liegt in jedem Windows 10 und 11; das
+   früher übliche `xbootmgr` aus dem Windows Performance Toolkit ist entbehrlich.
+
+Die Anwendung stellt scharf, sagt es, und **wartet**. Sie startet den Rechner
+nicht selbst neu — ein Monitor, der den Rechner neu startet, ist ein Monitor, den
+man nicht laufen lassen kann.
+
+Die Rechenzeit aus einer solchen Spur ist eine **Schätzung aus Abtastungen**,
+keine Messung: der Kernel unterbricht in festem Takt und notiert, welcher Thread
+gerade läuft. Bei der üblichen Millisekunde je Abtastung und Kern entspricht eine
+Abtastung rund einer CPU-Millisekunde. Über einen Startvorgang von Sekunden
+mittelt sich das aus, für einen Vorgang von 20 ms wäre die Zahl wertlos — deshalb
+steht die Zahl der Abtastungen mit im Ergebnis.
+
+**Windows' eigene Aufzeichnung enthält keine Abtastungen.** Auf der
+Referenzmaschine gemessen: 355 Prozesse und 43 000 Datenträgerzugriffe, aber
+null Profilereignisse — der Diagnoserichtliniendienst schaltet die
+Profilablaufverfolgung nicht ein. Aus dieser Quelle kommen also
+Datenträgerzugriffe und Startzeitpunkte, aber keine Rechenzeit. Die Oberfläche
+sagt das und lässt die Spalte leer, statt eine Spalte voller Nullen wie eine
+Messung aussehen zu lassen.
+
+Zwei weitere Eigenheiten dieser Quelle: Prozesse, die beim Beginn der
+Aufzeichnung schon liefen, tauchen in keinem Start-Ereignis auf — ihre Namen
+stehen ausschließlich in der Bestandsaufnahme, die ETW zu Beginn und Ende einer
+Sitzung schreibt (`ProcessDCStart`/`ProcessDCStop`). Ohne sie steht im Ergebnis
+„PID 4" statt „System", und gerade die langlebigen Systemprozesse haben die
+meisten Zugriffe. Und der Zeitstempel der ETW-Sitzung ist unzuverlässig: er
+meldete ein Datum ein Jahr vor dem letzten Start. Maßgeblich ist die
+Änderungszeit der Datei, die deshalb daneben steht.
+
 ## 9. Sampling-Takte
 
 | Intervall | Aufgabe |
@@ -509,13 +698,17 @@ das bedeutet, steht in README „Abweichungen".
 | 2000 ms | Prozessliste, Fensterliste und Verbindungstabelle — **nur wenn das Detailfenster geöffnet ist** |
 | 30 s | Dienst-Cache aktualisieren |
 | — | Ordnerbelegung (§8.11): **kein Takt**, ausschließlich auf Knopfdruck |
+| — | Startanalyse (§8.12): **kein Takt**. Sie liest Ereignisprotokolle, Registry und Aufgabenplanung und ändert sich zwischen zwei Systemstarts ohnehin nicht |
 
 Der Monitor darf nicht selbst zum Lastverursacher werden. Prozess-Enumeration ist
 der mit Abstand teuerste Teil und wird deshalb bedarfsgesteuert ausgeführt.
 
-Der Ordner-Scan ist die einzige Datenquelle **ganz ohne** Takt. Er kostet je nach
-Medium Sekunden bis Minuten und wird deshalb nie von selbst angestoßen, nie
-wiederholt und beim Schließen des Detailfensters abgebrochen.
+Ordner-Scan und Startanalyse sind die Datenquellen **ganz ohne** Takt. Der Scan
+kostet je nach Medium Sekunden bis Minuten und wird deshalb nie von selbst
+angestoßen, nie wiederholt und beim Schließen des Detailfensters abgebrochen. Die
+Startanalyse läuft einmal, wenn ihr Reiter zum ersten Mal aufgeschlagen wird, und
+danach nur noch auf Knopfdruck — ihr Gegenstand ist ein Ereignis der
+Vergangenheit, ein zweiter Lauf lieferte dasselbe Ergebnis.
 
 ## 10. Ringpuffer
 
@@ -614,6 +807,12 @@ durchlässig. Deshalb gilt:
 | `expandFolder` | `scan`, `node` | Kinder eines Knotens nachfordern |
 | `openFolder` | `scan`, `node` | Im Explorer zeigen |
 | `copyFolderPath` | `scan`, `node` | Pfad in die Zwischenablage |
+| `requestStartup` | — | Startanalyse erheben (§8.12) |
+| `bootTrace` | `key: arm\|cancel\|stop\|forget` | Startaufzeichnung schalten |
+| `analyzeTrace` | `key: windows\|own` | Eine Aufzeichnung auswerten |
+| `openTrace` | — | Die eigene Aufzeichnung im Explorer zeigen |
+| `requestHandles` | — | Handles aller Prozesse zählen |
+| `inspectProcess` | `pid`, `name` | Wartekette und offene Dateien eines Prozesses |
 
 Nach dem Start reist **nie wieder ein Pfad nach innen**: alles Weitere läuft über
 ganzzahlige Kennungen in einen Baum, den der Host selbst gebaut hat. Die
@@ -642,9 +841,9 @@ Ein Command zum Beenden von Prozessen ist bewusst nicht enthalten.
 Normales WPF-Fenster mit WebView2. Tabelle in HTML; Sortierung, Filterung,
 Gruppierung und Aggregation laufen vollständig in JavaScript.
 
-Sieben Reiter: **Prozesse**, **Energie**, **Verbindungen**, **System**,
-**Speicher**, **Logs**, **Einstellungen**. Die Kacheln über den Reitern gelten für
-alle.
+Acht Reiter: **Prozesse**, **Energie**, **Verbindungen**, **System**,
+**Speicher**, **System-Start**, **Logs**, **Einstellungen**. Die Kacheln über den
+Reitern gelten für alle.
 
 **Spaltenbreiten** sind in allen Tabellen an der rechten Kante der
 Spaltenüberschrift ziehbar, Doppelklick setzt eine Spalte zurück. Solange nichts
@@ -825,7 +1024,49 @@ Explorer kann beides besser.
 Bei schmalem **und** flachem Fenster weicht die Karte: untereinander blieben ihr
 rund 70 Pixel, darin ist keine Fläche mehr mit einer anderen zu vergleichen.
 
-### 13.6 Logs
+### 13.6 System-Start
+
+Beantwortet die Frage, mit der man vor einem Rechner sitzt, der ewig zum Starten
+braucht: **woran liegt es**. Nicht „welche Programme starten mit" — das zeigt der
+Task-Manager auch — sondern welcher davon den Start tatsächlich aufgehalten hat
+und um wie viele Sekunden.
+
+Der Aufbau folgt der Reihenfolge, in der man fragt:
+
+1. **Kacheln:** Startdauer, Hauptpfad, Nachlauf, Startart, Summe der Startkette.
+   Die Startdauer nennt daneben, was üblich wäre — das steht nicht im Ereignis,
+   ergibt sich aber aus `BootTime` minus `BootDegradationTime`.
+2. **Phasenband:** die Aufteilung des Hauptpfads als ein waagerechter Balken.
+   Beantwortet „wo ging die Zeit hin" in einem Blick. Die Einzelabschnitte decken
+   den Hauptpfad nicht vollständig ab; was übrig bleibt, steht als eigener Posten
+   „Übriger Hauptpfad" darin. Ohne ihn ergäbe die Summe der Balken weniger als
+   die Kachel darüber, und das Band behauptete eine Vollständigkeit, die es nicht
+   hat.
+3. **Befunde:** die eigentliche Antwort. Nach verlorener Zeit geordnet, jeder mit
+   Einstufung, Kosten in Sekunden, Erklärung und **Fundstelle**. Ein Befund ohne
+   Fundstelle wäre eine Behauptung. Hinweise ohne Zeitkosten — verwaiste
+   Einträge, leere Registry-Werte — sind standardmäßig ausgeblendet; sie machen
+   die Liste lang und beantworten die gestellte Frage nicht.
+4. **Startkette** als Zeitleiste über die volle Breite. Sie ist der Beweis zu den
+   Befunden: dass der Explorer nacheinander abarbeitet, sieht man erst, wenn die
+   Balken lückenlos aneinanderstoßen. Die Anmeldeaufgaben der Shell sind zu
+   Dutzenden vorhanden und je wenige Millisekunden lang; sie stehen als eine
+   gezählte Zeile am Ende statt als sechzig Striche.
+5. **Autostart-Einträge** als Tabelle. Dienste sind standardmäßig ausgeblendet —
+   auf einem Windows-Rechner sind es rund hundert, und sie starten vor der
+   Anmeldung, halten die Autostart-Kette also nicht auf. „Läuft nicht" und
+   „verzögert" gelten bei einem Dienst nicht als Auffälligkeit; das ist dort der
+   Normalfall und färbte sonst die halbe Liste rot.
+6. **Wartekette und Handles** für den laufenden Betrieb.
+7. **Startaufzeichnung** samt der ausgewerteten Kosten je Prozess.
+8. **Einschränkungen** — was die Zahlen darüber einschränkt, gleiche Regel wie
+   beim Ordner-Scan (§13.5).
+
+**Bericht kopieren** legt den vollständigen Befund als Text in die
+Zwischenablage. Das ist der Grund, warum dieser Reiter auch auf einem fremden
+Rechner nützt: wer ein Startproblem untersucht, sitzt selten davor.
+
+### 13.7 Logs
 
 Beantwortet eine einzige Frage: was wird gerade **nicht** gelesen, und warum.
 Jeder Eintrag nennt Einstufung (fällt aus / eingeschränkt / Hinweis), Folge und

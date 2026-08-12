@@ -4,7 +4,9 @@ using ResMon.Core.Config;
 using ResMon.Core.Diagnostics;
 using ResMon.Core.Inventory;
 using ResMon.Core.Model;
+using ResMon.Core.Native;
 using ResMon.Core.Processes;
+using ResMon.Core.Startup;
 using ResMon.Core.Storage;
 
 namespace ResMon.App.Bridge;
@@ -479,6 +481,197 @@ public static class WebBridge
                     usedPercent = Round(volume.UsedPercent),
                 }),
             }),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>
+    /// Die Startanalyse. Wie die Systemübersicht ein eigener Nachrichtentyp und
+    /// kein Anhängsel der Messnutzlast: sie wird auf Anforderung erhoben, ändert
+    /// sich zwischen zwei Systemstarts nicht und wäre im Sekundentakt reine Last.
+    /// </summary>
+    public static string BuildStartupPayload(StartupReport report, BootTraceStatus trace)
+    {
+        var payload = new
+        {
+            type = "startup",
+            collectedAt = report.CollectedAt,
+            powerOn = report.Boot.PowerOn,
+            bootKind = report.Boot.Kind,
+            sessionStart = report.SessionStart,
+            performance = report.Performance is not { } performance ? null : new
+            {
+                when = performance.When,
+                total = Round(performance.BootSeconds),
+                mainPath = Round(performance.MainPathSeconds),
+                postBoot = Round(performance.PostBootSeconds),
+                apps = performance.StartupAppCount,
+                degraded = performance.Degraded,
+                degradation = Round(performance.DegradationSeconds),
+                phases = performance.Phases
+                    .Select(p => new { key = p.Key, label = p.Label, seconds = Round(p.Seconds, 2) })
+                    .ToArray(),
+            },
+            // Die Anmeldeaufgaben der Shell sind zu Dutzenden vorhanden und je
+            // wenige Millisekunden lang; einzeln aufgeführt verstopfen sie die
+            // Zeitleiste, für die Gesamtrechnung fehlen dürfen sie nicht.
+            chain = report.Chain
+                .Where(item => item.Kind != ChainKind.LogonTask)
+                .Select(item => new
+                {
+                    kind = item.Kind,
+                    command = item.Command,
+                    started = item.Started,
+                    seconds = item.Duration is { } span ? Round(span.TotalSeconds, 2) : (double?)null,
+                    pid = item.Pid,
+                })
+                .ToArray(),
+            logonTasks = report.Chain.Count(item => item.Kind == ChainKind.LogonTask),
+            entries = report.Entries.Select(entry => new
+            {
+                name = entry.Name,
+                source = entry.Source,
+                sourceLabel = entry.SourceLabel,
+                command = entry.Command,
+                path = entry.ImagePath,
+                args = entry.Arguments,
+                enabled = entry.Enabled,
+                disabledAt = entry.DisabledAt,
+                publisher = entry.Publisher,
+                description = entry.Description,
+                exists = entry.FileExists,
+                pid = entry.Pid,
+                offset = entry.Offset is { } offset ? Round(offset.TotalSeconds, 2) : (double?)null,
+                seconds = entry.Duration is { } duration ? Round(duration.TotalSeconds, 2) : (double?)null,
+                detail = entry.Detail,
+                issues = entry.Issues == StartupIssue.None ? null : entry.Issues.ToString(),
+            }).ToArray(),
+            findings = report.Findings.Select(finding => new
+            {
+                severity = finding.Severity,
+                title = finding.Title,
+                why = finding.Why,
+                seconds = Round(finding.CostSeconds),
+                when = finding.When,
+                evidence = finding.Evidence,
+            }).ToArray(),
+            limitations = report.Limitations,
+            trace = new
+            {
+                state = trace.State,
+                message = trace.Message,
+                armedAt = trace.ArmedAt,
+                path = trace.TracePath,
+                sizeBytes = trace.SizeBytes,
+                error = trace.Error,
+                warning = BootTrace.Warning,
+            },
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>
+    /// Nur der Zustand der Startaufzeichnung. Eigene Nachricht, damit ein Klick
+    /// auf „Scharfstellen“ nicht die ganze Analyse neu erheben muss.
+    /// </summary>
+    public static string BuildTracePayload(BootTraceStatus trace)
+    {
+        var payload = new
+        {
+            type = "trace",
+            state = trace.State,
+            message = trace.Message,
+            armedAt = trace.ArmedAt,
+            path = trace.TracePath,
+            sizeBytes = trace.SizeBytes,
+            error = trace.Error,
+            warning = BootTrace.Warning,
+            // Windows zeichnet jeden Start selbst auf; das ist ohne Neustart
+            // auswertbar und deshalb der erste Weg, den die Seite anbietet.
+            windowsTrace = BootTraceAnalyzer.WindowsTraceAvailable(),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>
+    /// Das Ergebnis einer ausgewerteten Startaufzeichnung: was jeder Prozess
+    /// während des Starts an Rechenzeit und Datenträgerzugriffen gekostet hat.
+    /// </summary>
+    public static string BuildTraceSummaryPayload(BootTraceSummary? summary, int limit)
+    {
+        var payload = new
+        {
+            type = "traceSummary",
+            available = summary is not null,
+            path = summary?.Path,
+            when = summary?.When,
+            fileTime = summary?.FileTime,
+            seconds = Round(summary?.DurationSeconds ?? 0),
+            samples = summary?.SampleCount ?? 0,
+            hasCpu = summary?.HasCpuSamples ?? false,
+            fromLastBoot = summary?.FromLastBoot ?? true,
+            fromWindows = summary?.FromWindows ?? false,
+            error = summary?.Error,
+            processes = summary?.Processes.Take(limit).Select(process => new
+            {
+                pid = process.Pid,
+                name = process.Name,
+                cpuMs = Round(process.CpuMs, 0),
+                readBytes = process.DiskReadBytes,
+                writeBytes = process.DiskWriteBytes,
+                operations = process.DiskOperations,
+                startMs = Round(process.StartOffsetMs, 0),
+            }).ToArray(),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>Die Wartekette eines Prozesses oder die Handle-Auskunft dazu.</summary>
+    public static string BuildInspectPayload(
+        int pid, string? name, WaitChainResult? chain, IReadOnlyList<OpenFile>? files, int? handleCount)
+    {
+        var payload = new
+        {
+            type = "inspect",
+            pid,
+            name,
+            handleCount,
+            cycle = chain?.IsCycle,
+            chain = chain?.Nodes.Select(node => new
+            {
+                objectType = node.Type,
+                status = node.Status,
+                pid = node.ProcessId == 0 ? (int?)null : node.ProcessId,
+                threadId = node.ThreadId == 0 ? (int?)null : node.ThreadId,
+                waitMs = node.WaitMilliseconds == 0 ? (long?)null : node.WaitMilliseconds,
+                objectName = node.ObjectName,
+            }).ToArray(),
+            files = files?.Select(file => new { handle = file.Handle, kind = file.Kind, name = file.Name }).ToArray(),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>Die Handle-Zählung aller Prozesse, absteigend.</summary>
+    public static string BuildHandlesPayload(
+        IReadOnlyList<ProcessHandles> handles, IReadOnlyDictionary<int, string> names, int limit)
+    {
+        var payload = new
+        {
+            type = "handles",
+            collectedAt = DateTime.Now,
+            total = handles.Sum(h => h.Total),
+            processes = handles.Take(limit).Select(entry => new
+            {
+                pid = entry.Pid,
+                name = names.TryGetValue(entry.Pid, out string? found) ? found : null,
+                total = entry.Total,
+                byType = entry.ByType,
+            }).ToArray(),
         };
 
         return JsonSerializer.Serialize(payload, Options);

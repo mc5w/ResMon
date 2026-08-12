@@ -9,7 +9,9 @@ using ResMon.Core.Config;
 using ResMon.Core.Diagnostics;
 using ResMon.Core.Inventory;
 using ResMon.Core.Model;
+using ResMon.Core.Native;
 using ResMon.Core.Processes;
+using ResMon.Core.Startup;
 using ResMon.Core.Storage;
 // WinForms ist wegen des Tray-Icons referenziert und bringt eigene Typen mit.
 using MessageBox = System.Windows.MessageBox;
@@ -34,6 +36,21 @@ public partial class DetailWindow : Window
     private FolderScanSession? _scan;
     private DispatcherTimer? _scanProgress;
     private int _scanId;
+
+    /// <summary>Läuft gerade eine Startanalyse? Ein zweiter Aufruf wird verworfen.</summary>
+    private bool _startupBusy;
+
+    /// <summary>
+    /// So viele Zeilen bekommt die Handle-Liste. Auf einem laufenden System haben
+    /// mehrere hundert Prozesse Handles; interessant sind die mit den meisten.
+    /// </summary>
+    private const int HandleRows = 120;
+
+    /// <summary>
+    /// So viele Prozesse nennt die ausgewertete Startaufzeichnung. Ein Start
+    /// berührt mehrere hundert; interessant sind die teuersten.
+    /// </summary>
+    private const int TraceRows = 40;
 
     public DetailWindow(AppSettings settings)
     {
@@ -163,6 +180,25 @@ public partial class DetailWindow : Window
             case "requestSettings":
                 PushSettings();
                 break;
+            case "requestStartup":
+                RunStartupAnalysis();
+                break;
+            case "bootTrace" when command.Key is { } action:
+                ApplyBootTrace(action);
+                break;
+            case "openTrace":
+                if (BootTrace.Read().TracePath is { } trace)
+                    PathActions.Reveal(this, trace);
+                break;
+            case "analyzeTrace" when command.Key is { } which:
+                RunTraceAnalysis(which);
+                break;
+            case "requestHandles":
+                RunHandleSnapshot();
+                break;
+            case "inspectProcess" when command.Pid is { } inspected:
+                RunInspect(inspected, command.Name);
+                break;
             case "startFolderScan" when command.Path is { } path:
                 StartFolderScan(path);
                 break;
@@ -213,6 +249,138 @@ public partial class DetailWindow : Window
 
         base.OnClosed(e);
     }
+
+    /// <summary>
+    /// Erhebt die Startanalyse im Hintergrund und schiebt sie in die Seite.
+    /// </summary>
+    /// <remarks>
+    /// Die Erhebung liest mehrere Ereignisprotokolle und die Aufgabenplanung und
+    /// braucht dafür je nach Rechner einige hundert Millisekunden bis wenige
+    /// Sekunden — auf dem UI-Thread wäre das ein sichtbarer Hänger. Ein zweiter
+    /// Aufruf, während der erste noch läuft, wird verworfen: die Schaltfläche
+    /// „Neu erheben“ ist schnell zweimal gedrückt, und zwei Läufe lieferten
+    /// dasselbe Ergebnis.
+    /// </remarks>
+    private void RunStartupAnalysis()
+    {
+        if (_startupBusy)
+            return;
+
+        _startupBusy = true;
+        _ = Task.Run(() => (Report: StartupAnalyzer.Analyze(), Trace: BootTrace.Read()))
+            .ContinueWith(
+                task => Dispatcher.BeginInvoke(() =>
+                {
+                    _startupBusy = false;
+                    if (!_webReady)
+                        return;
+
+                    if (task.IsFaulted)
+                    {
+                        DiagnosticLog.Report("Startanalyse", task.Exception!.GetBaseException(),
+                            "Die Analyse des Systemstarts ist fehlgeschlagen");
+                        return;
+                    }
+
+                    Web.CoreWebView2.PostWebMessageAsJson(
+                        WebBridge.BuildStartupPayload(task.Result.Report, task.Result.Trace));
+                }),
+                TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Schaltet die Startaufzeichnung. Der Neustart selbst wird bewusst nicht
+    /// ausgelöst — ein Monitor, der den Rechner neu startet, ist ein Monitor, den
+    /// man nicht laufen lassen kann.
+    /// </summary>
+    private void ApplyBootTrace(string action)
+        => _ = Task.Run(() => action switch
+            {
+                "arm" => BootTrace.Arm(),
+                "cancel" => BootTrace.Cancel(),
+                "stop" => BootTrace.Stop(),
+                "forget" => BootTrace.Forget(),
+                _ => BootTrace.Read(),
+            })
+            .ContinueWith(
+                task => Dispatcher.BeginInvoke(() =>
+                {
+                    if (_webReady)
+                        Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildTracePayload(task.Result));
+                }),
+                TaskContinuationOptions.OnlyOnRanToCompletion);
+
+    /// <summary>
+    /// Wertet eine Startaufzeichnung aus — entweder die, die Windows bei jedem
+    /// Hochfahren selbst anlegt, oder die eigene aus <see cref="BootTrace"/>.
+    /// </summary>
+    /// <remarks>
+    /// Das Lesen einer ETL-Datei geht über Millionen Ereignisse und dauert je
+    /// nach Größe Sekunden bis Minuten. Es läuft deshalb im Hintergrund und
+    /// ausschließlich auf Knopfdruck.
+    /// </remarks>
+    private void RunTraceAnalysis(string which)
+        => _ = Task.Run<BootTraceSummary?>(() => which == "own"
+                ? BootTrace.Read().TracePath is { } path ? BootTraceAnalyzer.Analyze(path) : null
+                : BootTraceAnalyzer.AnalyzeWindowsTrace())
+            .ContinueWith(
+                task => Dispatcher.BeginInvoke(() =>
+                {
+                    if (_webReady)
+                        Web.CoreWebView2.PostWebMessageAsJson(
+                            WebBridge.BuildTraceSummaryPayload(task.Result, TraceRows));
+                }),
+                TaskContinuationOptions.OnlyOnRanToCompletion);
+
+    /// <summary>Zählt die Handles aller Prozesse und schiebt die Liste in die Seite.</summary>
+    private void RunHandleSnapshot()
+        => _ = Task.Run(() =>
+            {
+                IReadOnlyList<ProcessHandles> handles = HandleTable.Snapshot();
+                Dictionary<int, string> names = Toolhelp.Snapshot()
+                    .ToDictionary(entry => entry.Key, entry => entry.Value.ExeName);
+                return (handles, names);
+            })
+            .ContinueWith(
+                task => Dispatcher.BeginInvoke(() =>
+                {
+                    if (_webReady)
+                    {
+                        Web.CoreWebView2.PostWebMessageAsJson(
+                            WebBridge.BuildHandlesPayload(task.Result.handles, task.Result.names, HandleRows));
+                    }
+                }),
+                TaskContinuationOptions.OnlyOnRanToCompletion);
+
+    /// <summary>
+    /// Sieht einem einzelnen Prozess zu: worauf er wartet und was er offen hat.
+    /// </summary>
+    /// <remarks>
+    /// Beides zusammen, weil beides dieselbe Frage aus zwei Richtungen
+    /// beantwortet — ein Prozess, der auf nichts wartet und nichts Ungewöhnliches
+    /// offen hat, ist nicht der Gesuchte. <c>SeDebugPrivilege</c> wird hier
+    /// eingeschaltet und nicht beim Start: es ist das Recht, jeden fremden Prozess
+    /// zu öffnen, und soll nur mitlaufen, wenn es gebraucht wird.
+    /// </remarks>
+    private void RunInspect(int pid, string? name)
+        => _ = Task.Run(() =>
+            {
+                ProcessPrivileges.EnableDebug();
+                WaitChainResult? chain = WaitChain.ForProcess(pid);
+                IReadOnlyList<OpenFile> files = HandleTable.FilesOf(pid);
+                int? count = HandleTable.Snapshot().FirstOrDefault(h => h.Pid == pid)?.Total;
+                return (chain, files, count);
+            })
+            .ContinueWith(
+                task => Dispatcher.BeginInvoke(() =>
+                {
+                    if (_webReady)
+                    {
+                        Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildInspectPayload(
+                            pid, name, task.Result.chain, task.Result.files, task.Result.count));
+                    }
+                }),
+                TaskContinuationOptions.OnlyOnRanToCompletion);
 
     /// <summary>
     /// Startet einen Ordner-Scan. Die Sitzung liegt im Fenster und nicht im

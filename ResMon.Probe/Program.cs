@@ -8,6 +8,7 @@ using ResMon.Core.Model;
 using ResMon.Core.Native;
 using ResMon.Core.Processes;
 using ResMon.Core.Sensors;
+using ResMon.Core.Startup;
 using ResMon.Core.Storage;
 
 [assembly: SupportedOSPlatform("windows")]
@@ -35,6 +36,8 @@ internal static class Program
             "snapshot" => DumpSnapshot(Iterations(args, 3)),
             "paths" => DumpPaths(),
             "system" => DumpSystem(),
+            "startup" => DumpStartup(),
+            "boottrace" => DumpBootTrace(args.Length > 1 ? args[1] : null),
             "scan" => DumpScan(args.Length > 1 ? args[1] : @"C:\"),
             _ => Help(),
         };
@@ -53,6 +56,8 @@ internal static class Program
               energy [n]         Leistungsaufnahme, Lüfterdrehzahlen und Akku
               snapshot [n]       Was der Collector ausliefert, samt Herkunft jedes CPU-Werts
               system             Systemübersicht: OS, CPU, GPU, RAM, Mainboard, Datenträger
+              startup            Systemstart: Phasen, Startkette, Autostart-Einträge, Befunde
+              boottrace [datei]  ETW-Startaufzeichnung auswerten (Vorgabe: die von Windows selbst)
               paths              Prüfen, welche PDH-Zählerpfade dieses System kennt
               scan [Laufwerk]    Ordnerbelegung einer Partition messen (Vorgabe C:\)
 
@@ -450,6 +455,156 @@ internal static class Program
     }
 
     /// <summary>Gibt die Systemübersicht aus, wie sie das Detailfenster anzeigt.</summary>
+    /// <summary>
+    /// Die Startanalyse als Text. Der Reihe nach: was Windows selbst gemessen
+    /// hat, die Kette der Autostart-Befehle mit ihren Dauern, die Befunde und
+    /// zuletzt das vollständige Inventar.
+    /// </summary>
+    private static int DumpStartup()
+    {
+        StartupReport report = StartupAnalyzer.Analyze();
+
+        Console.WriteLine($"Erhoben          {report.CollectedAt:dd.MM.yyyy HH:mm:ss}");
+        Console.WriteLine($"Eingeschaltet    {Time(report.Boot.PowerOn)}  ({report.Boot.Kind})");
+        Console.WriteLine($"Angemeldet       {Time(report.SessionStart)}");
+        Console.WriteLine();
+
+        if (report.Performance is { } performance)
+        {
+            Console.WriteLine("Startmessung von Windows");
+            Console.WriteLine($"    Gesamt       {performance.BootSeconds,7:N1} s");
+            Console.WriteLine($"    Hauptpfad    {performance.MainPathSeconds,7:N1} s");
+            Console.WriteLine($"    Nachlauf     {performance.PostBootSeconds,7:N1} s");
+            Console.WriteLine($"    Programme    {performance.StartupAppCount,7}");
+            if (performance.Degraded)
+                Console.WriteLine($"    Verschlechterung {performance.DegradationSeconds:N1} s gegenüber sonst");
+
+            Console.WriteLine();
+            foreach (BootPhase phase in performance.Phases)
+                Console.WriteLine($"    {phase.Label,-22} {phase.Seconds,7:N2} s");
+        }
+        else
+        {
+            Console.WriteLine("Startmessung von Windows: keine (Protokoll gesperrt oder leer)");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"Startkette ({report.Chain.Count} Glieder)");
+        foreach (ChainItem item in report.Chain.Where(i => i.Kind != ChainKind.LogonTask))
+        {
+            string duration = item.Duration is { } span ? $"{span.TotalSeconds,7:N2} s" : "      offen";
+            Console.WriteLine($"    {item.Started:HH:mm:ss.fff} {duration}  [{item.Kind}] {item.Command}");
+        }
+
+        int tasks = report.Chain.Count(i => i.Kind == ChainKind.LogonTask);
+        if (tasks > 0)
+            Console.WriteLine($"    … dazu {tasks} Anmeldeaufgaben der Shell");
+
+        Console.WriteLine();
+        Console.WriteLine($"Befunde ({report.Findings.Count})");
+        foreach (StartupFinding finding in report.Findings)
+        {
+            string cost = finding.CostSeconds is { } seconds ? $"{seconds,7:N1} s" : "       –";
+            Console.WriteLine($"    [{finding.Severity,-6}] {cost}  {finding.Title}");
+            Console.WriteLine($"                       {finding.Evidence}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"Autostart-Einträge ({report.Entries.Count})");
+        foreach (IGrouping<StartupSource, StartupEntry> group in report.Entries.GroupBy(e => e.Source))
+        {
+            Console.WriteLine($"  {group.Key} ({group.Count()})");
+            foreach (StartupEntry entry in group.Take(20))
+            {
+                string state = entry.Enabled ? "an " : "aus";
+                string duration = entry.Duration is { } span ? $"{span.TotalSeconds,6:N2} s" : "        ";
+                string issues = entry.Issues == StartupIssue.None ? string.Empty : $"  ⚠ {entry.Issues}";
+                Console.WriteLine($"    [{state}] {duration} {entry.Name,-34}{issues}");
+            }
+
+            if (group.Count() > 20)
+                Console.WriteLine($"    … und {group.Count() - 20} weitere");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("Einschränkungen");
+        foreach (string note in report.Limitations)
+            Console.WriteLine($"    • {note}");
+
+        return 0;
+
+        static string Time(DateTime? value) => value is { } when ? when.ToString("dd.MM.yyyy HH:mm:ss") : "unbekannt";
+    }
+
+    /// <summary>
+    /// Wertet eine Startaufzeichnung aus. Ohne Argument die, die Windows bei
+    /// jedem Hochfahren selbst anlegt — sie liegt in einem nur erhöht lesbaren
+    /// Ordner.
+    /// </summary>
+    private static int DumpBootTrace(string? path)
+    {
+        string target = path ?? BootTraceAnalyzer.WindowsTracePath;
+        Console.WriteLine($"Aufzeichnung: {target}");
+
+        if (path is null && !BootTraceAnalyzer.WindowsTraceAvailable())
+        {
+            Console.Error.WriteLine("Nicht vorhanden oder nicht lesbar. Als Administrator ausführen.");
+            return 1;
+        }
+
+        Console.WriteLine("Wird ausgewertet …");
+        BootTraceSummary summary = BootTraceAnalyzer.Analyze(target);
+
+        if (summary.Error is { } error)
+        {
+            Console.Error.WriteLine($"Fehlgeschlagen: {error}");
+            return 1;
+        }
+
+        Console.WriteLine($"Sitzung ab:   {summary.When:dd.MM.yyyy HH:mm:ss}");
+        Console.WriteLine($"Datei vom:    {summary.FileTime:dd.MM.yyyy HH:mm:ss}");
+        Console.WriteLine($"Dauer:        {summary.DurationSeconds:N1} s");
+        Console.WriteLine($"Abtastungen:  {summary.SampleCount:N0}");
+        Console.WriteLine($"Prozesse:     {summary.Processes.Count}");
+
+        if (!summary.FromLastBoot)
+        {
+            Console.WriteLine();
+            Console.WriteLine(
+                "ACHTUNG: Diese Aufzeichnung stammt NICHT vom letzten Start. Die Startdiagnose von");
+            Console.WriteLine(
+                "Windows läuft nicht bei jedem Hochfahren — die Zahlen unten zeigen einen früheren Start.");
+        }
+
+        if (!summary.HasCpuSamples)
+        {
+            Console.WriteLine();
+            Console.WriteLine(
+                "Ohne Profilablaufverfolgung: diese Aufzeichnung enthält keine CPU-Abtastungen.");
+            Console.WriteLine(
+                "Die Spalte „CPU“ bleibt deshalb leer — Datenträgerzugriffe und Startzeitpunkte stimmen.");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine($"{"Prozess",-34}{"CPU",10}{"Lesen",12}{"Schreiben",12}{"Zugriffe",10}{"Start",10}");
+
+        foreach (TraceProcess process in summary.Processes.Take(30))
+        {
+            string start = process.StartOffsetMs is { } offset ? $"{offset / 1000:N1} s" : "vorher";
+            Console.WriteLine(
+                $"{Cut(process.Name, 32),-34}" +
+                (summary.HasCpuSamples ? $"{process.CpuMs / 1000:N2} s" : "–").PadLeft(10) +
+                $"{process.DiskReadBytes / 1048576.0:N1} MB".PadLeft(12) +
+                $"{process.DiskWriteBytes / 1048576.0:N1} MB".PadLeft(12) +
+                $"{process.DiskOperations:N0}".PadLeft(10) +
+                start.PadLeft(10));
+        }
+
+        return 0;
+
+        static string Cut(string value, int max) => value.Length <= max ? value : value[..(max - 1)] + "…";
+    }
+
     private static int DumpSystem()
     {
         SystemInfo info = SystemInfoProvider.Collect();

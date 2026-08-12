@@ -1985,3 +1985,523 @@ td.conn-none {
         min-height: 120px;
     }
 }
+
+/* ---------- Reiter „System-Start“ ---------- */
+
+/* Der Reiter ist der einzige, der mehr Inhalt hat als Höhe: Kacheln, Band,
+   Befunde, Zeitleiste, zwei Tabellen. Er scrollt deshalb als Ganzes, statt
+   jeden Abschnitt für sich scrollen zu lassen — verschachtelte Bildlaufleisten
+   sind der sicherste Weg, eine Seite unbedienbar zu machen. */
+.startup-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.startup-tiles {
+    grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+    flex: 0 0 auto;
+}
+
+.startup-tiles .big {
+    font-size: 26px;
+}
+
+/* Eine Kachel, deren Wert ein Wort statt einer Zahl ist — „Schnellstart“ passt
+   nicht in 26 Pixel Ziffernhöhe, ohne die Zeile zu sprengen. */
+.startup-tiles .big.word {
+    font-size: 17px;
+    font-weight: 400;
+    padding-top: 7px;
+}
+
+.startup-tiles .sub {
+    font-size: 11px;
+    color: var(--muted);
+    margin-top: 3px;
+}
+
+.startup-tiles .sub.warn {
+    color: var(--notice);
+}
+
+.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 11px 13px 13px;
+    flex: 0 0 auto;
+}
+
+.startup-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 9px;
+}
+
+/* Der erklärende Halbsatz neben der Überschrift steht bewusst dort und nicht in
+   einem Tooltip: er nennt die Quelle, und eine Zahl ohne Quelle ist in diesem
+   Reiter eine Behauptung. */
+.startup-hint {
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    font-size: 11px;
+    color: var(--muted);
+    opacity: 0.85;
+    text-align: right;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.startup-hint em {
+    font-style: italic;
+}
+
+.startup-toggle {
+    font-weight: 400;
+    letter-spacing: 0;
+    text-transform: none;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.startup-empty {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+    max-width: 62ch;
+    padding: 10px 2px;
+}
+
+.startup-controls {
+    margin-bottom: 9px;
+}
+
+.startup-controls input[type="search"] {
+    flex: 1 1 240px;
+    min-width: 160px;
+}
+
+/* ---------- Phasenband ---------- */
+
+.phase-band {
+    display: flex;
+    height: 30px;
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+
+.phase-band div {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    /* Dunkle Schrift auf den durchweg hellen Bandfarben — die sind bewusst in
+       allen Schemata hell, damit die Abschnitte sich voneinander abheben, und
+       var(--text) wäre im dunklen Schema hell auf hell. */
+    color: #10131a;
+    white-space: nowrap;
+    overflow: hidden;
+    min-width: 0;
+}
+
+.phase-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+.phase-legend i {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    margin-right: 5px;
+    vertical-align: -1px;
+}
+
+/* ---------- Befunde ---------- */
+
+.finding-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.finding {
+    display: grid;
+    grid-template-columns: 82px 76px minmax(0, 1fr);
+    gap: 10px;
+    align-items: baseline;
+    padding: 9px 0;
+    border-top: 1px solid var(--grid);
+}
+
+.finding:first-child {
+    border-top: 0;
+    padding-top: 2px;
+}
+
+.finding .sev {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-align: center;
+}
+
+.finding .sev.high {
+    background: rgba(248, 113, 113, 0.18);
+    color: #f87171;
+}
+
+.finding .sev.medium {
+    background: rgba(252, 211, 77, 0.16);
+    color: var(--notice);
+}
+
+.finding .sev.hint {
+    background: var(--hover);
+    color: var(--muted);
+}
+
+.finding .cost {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: 15px;
+    text-align: right;
+}
+
+.finding .cost.high { color: #f87171; }
+.finding .cost.medium { color: var(--notice); }
+.finding .cost.hint { color: var(--muted); }
+
+.finding .title {
+    font-size: 12.5px;
+}
+
+.finding .why {
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.55;
+    margin-top: 2px;
+    max-width: 96ch;
+}
+
+.finding .evidence {
+    color: var(--muted);
+    font-size: 11px;
+    opacity: 0.8;
+    margin-top: 3px;
+    font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+/* ---------- Startkette ---------- */
+
+.gantt {
+    display: flex;
+    flex-direction: column;
+}
+
+.gantt-axis,
+.gantt-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 260px) minmax(0, 1fr) 66px;
+    gap: 10px;
+    align-items: center;
+}
+
+.gantt-axis {
+    font-size: 10.5px;
+    color: var(--muted);
+    margin-bottom: 5px;
+}
+
+.gantt-axis .ticks {
+    display: flex;
+    justify-content: space-between;
+}
+
+.gantt-row {
+    padding: 2.5px 0;
+}
+
+.gantt-row .name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 12px;
+}
+
+.gantt-row .name em {
+    font-style: normal;
+    color: var(--muted);
+    font-size: 11px;
+    margin-left: 6px;
+}
+
+.gantt-row .track {
+    position: relative;
+    height: 15px;
+    background: var(--panel-2);
+    border-radius: 3px;
+}
+
+.gantt-row .bar {
+    position: absolute;
+    top: 0;
+    height: 15px;
+    border-radius: 3px;
+    background: var(--gpu);
+    min-width: 2px;
+}
+
+.gantt-row .bar.slow { background: var(--notice); }
+.gantt-row .bar.bad { background: #f87171; }
+
+.gantt-row .dur {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    font-size: 11.5px;
+}
+
+/* ---------- Autostart-Tabelle ---------- */
+
+.startup-table-wrap {
+    max-height: 420px;
+}
+
+#startup-entries td.num,
+#handles-table td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+#startup-entries tr.off td {
+    opacity: 0.5;
+}
+
+#startup-entries tr.flagged td {
+    background: rgba(248, 113, 113, 0.09);
+}
+
+.pill {
+    font-size: 10.5px;
+    padding: 1px 7px;
+    border-radius: 9px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    white-space: nowrap;
+}
+
+.pill.on {
+    color: var(--gpu);
+    border-color: color-mix(in srgb, var(--gpu) 40%, transparent);
+    background: color-mix(in srgb, var(--gpu) 12%, transparent);
+}
+
+.pill.err {
+    color: #f87171;
+    border-color: rgba(248, 113, 113, 0.4);
+    background: rgba(248, 113, 113, 0.12);
+}
+
+.mono {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 11px;
+    color: var(--muted);
+}
+
+/* ---------- Wartekette und Handles ---------- */
+
+.inspect-split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+}
+
+.inspect-list {
+    max-height: 320px;
+    min-width: 0;
+}
+
+.inspect-detail {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    max-height: 320px;
+    overflow-y: auto;
+    min-width: 0;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.inspect-detail h4 {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 12px 0 6px;
+}
+
+.inspect-detail h4:first-child {
+    margin-top: 0;
+}
+
+/* Die Kette wird eingerückt gezeichnet: jedes Glied wartet auf das darunter,
+   und eine Einrückung sagt das ohne Legende. */
+.wait-node {
+    font-size: 12px;
+    padding: 3px 0 3px 10px;
+    border-left: 2px solid var(--border);
+    margin-left: 3px;
+}
+
+.wait-node .what {
+    color: var(--text);
+}
+
+.wait-node .meta {
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.wait-node.blocked {
+    border-left-color: var(--notice);
+}
+
+.wait-node.cycle {
+    border-left-color: #f87171;
+}
+
+.wait-cycle {
+    color: #f87171;
+    font-size: 12px;
+    margin-bottom: 8px;
+    line-height: 1.5;
+}
+
+.file-list {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.65;
+    word-break: break-all;
+}
+
+#handles-table tbody tr {
+    cursor: pointer;
+}
+
+#handles-table tbody tr.selected td {
+    background: var(--hover);
+}
+
+/* ---------- Startaufzeichnung ---------- */
+
+.trace-body {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--muted);
+}
+
+.trace-body .state {
+    color: var(--text);
+    margin-bottom: 6px;
+}
+
+.trace-body .warning {
+    max-width: 92ch;
+    margin-bottom: 9px;
+}
+
+.trace-body .error {
+    color: #f87171;
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 11px;
+    margin-top: 7px;
+    white-space: pre-wrap;
+}
+
+.trace-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.trace-table-wrap {
+    max-height: 340px;
+    margin-top: 10px;
+}
+
+#trace-summary td.num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Einschränkungen ---------- */
+
+.startup-limits {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.startup-limits li {
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--muted);
+    padding-left: 14px;
+    position: relative;
+    max-width: 108ch;
+}
+
+.startup-limits li::before {
+    content: "•";
+    position: absolute;
+    left: 2px;
+}
+
+/* Bei schmalem Fenster stehen Liste und Einzelheiten untereinander; nebeneinander
+   bliebe für einen Dateipfad keine lesbare Breite mehr. */
+@media (max-width: 1100px) {
+    .inspect-split {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .inspect-detail {
+        max-height: 220px;
+    }
+
+    .gantt-axis,
+    .gantt-row {
+        grid-template-columns: minmax(110px, 170px) minmax(0, 1fr) 60px;
+    }
+}

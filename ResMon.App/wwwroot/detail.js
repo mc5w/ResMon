@@ -3187,6 +3187,13 @@ for (const tab of document.querySelectorAll('.tab')) {
             renderStorageTable();
             renderCrumbs();
             drawTreemap();
+        } else if (state.view === 'startup') {
+            // Die Analyse liest mehrere Ereignisprotokolle und braucht Sekunden;
+            // sie läuft deshalb erst, wenn jemand den Reiter auch aufschlägt —
+            // und danach nur noch auf Knopfdruck.
+            if (!startupState.requested) {
+                requestStartup();
+            }
         } else if (state.view === 'system' && !state.systemLoaded) {
             // Die Übersicht wird genau einmal gesendet. Ist sie nicht angekommen
             // — etwa weil die Seite beim Senden noch lud —, hier nachfragen.
@@ -4307,6 +4314,42 @@ if (host) {
             return;
         }
 
+        // Die Nachrichten des Reiters „System-Start". Alle vier stehen für sich
+        // und reisen nicht in der Messnutzlast mit: sie entstehen auf
+        // Anforderung, stoßweise und unverwandt zum Sekundentakt — dieselbe
+        // Überlegung wie beim Ordner-Scan.
+        if (data.type === 'startup') {
+            startupState.report = data;
+            startupState.trace = data.trace;
+            startupState.loaded = true;
+            startup.refresh.disabled = false;
+            startup.status.textContent = `Erhoben ${dateText(data.collectedAt)}`;
+            renderStartup();
+            return;
+        }
+
+        if (data.type === 'trace') {
+            startupState.trace = data;
+            renderTrace();
+            return;
+        }
+
+        if (data.type === 'handles') {
+            startupState.handles = data;
+            renderHandles();
+            return;
+        }
+
+        if (data.type === 'inspect') {
+            renderInspect(data);
+            return;
+        }
+
+        if (data.type === 'traceSummary') {
+            renderTraceSummary(data);
+            return;
+        }
+
         if (data.type !== 'detail') {
             return;
         }
@@ -4349,3 +4392,1058 @@ if (host) {
         }
     });
 }
+
+// ---------- Reiter „System-Start" ----------
+
+/* Der Reiter beantwortet drei Fragen in dieser Reihenfolge: wie lange hat der
+   Start gedauert und wo ging die Zeit hin, was hat ihn aufgehalten, und was ist
+   überhaupt eingetragen. Alles darin wird auf Anforderung erhoben und nicht im
+   Takt — die Ereignisprotokolle sind teuer und ändern sich zwischen zwei Starts
+   ohnehin nicht. */
+
+const startup = {
+    refresh: document.getElementById('startup-refresh'),
+    copy: document.getElementById('startup-copy'),
+    status: document.getElementById('startup-status'),
+    tiles: document.getElementById('startup-tiles'),
+    phasesPanel: document.getElementById('startup-phases-panel'),
+    phases: document.getElementById('startup-phases'),
+    phaseLegend: document.getElementById('startup-phase-legend'),
+    findings: document.getElementById('startup-findings'),
+    findingsEmpty: document.getElementById('startup-findings-empty'),
+    allFindings: document.getElementById('startup-all-findings'),
+    chain: document.getElementById('startup-chain'),
+    chainEmpty: document.getElementById('startup-chain-empty'),
+    filter: document.getElementById('startup-filter'),
+    withServices: document.getElementById('startup-services'),
+    withDisabled: document.getElementById('startup-disabled'),
+    onlyIssues: document.getElementById('startup-issues'),
+    count: document.getElementById('startup-count'),
+    entriesHead: document.getElementById('startup-entries-head'),
+    entriesBody: document.querySelector('#startup-entries tbody'),
+    limitsPanel: document.getElementById('startup-limits-panel'),
+    limits: document.getElementById('startup-limits'),
+    traceBody: document.getElementById('trace-body'),
+    traceWrap: document.getElementById('trace-summary-wrap'),
+    traceHead: document.getElementById('trace-summary-head'),
+    traceRows: document.querySelector('#trace-summary tbody'),
+    handlesRefresh: document.getElementById('handles-refresh'),
+    handlesStatus: document.getElementById('handles-status'),
+    handlesHead: document.getElementById('handles-head'),
+    handlesBody: document.querySelector('#handles-table tbody'),
+    handlesEmpty: document.getElementById('handles-empty'),
+    inspect: document.getElementById('inspect-detail'),
+};
+
+const startupState = {
+    report: null,
+    trace: null,
+    handles: null,
+    loaded: false,
+    requested: false,
+    filter: '',
+    withServices: false,
+    withDisabled: true,
+    onlyIssues: false,
+    allFindings: false,
+    selectedPid: null,
+};
+
+/* Feste Farben statt Schema-Variablen: das Band braucht neun unterscheidbare
+   Töne, und die Schemata führen fünf. Sie sind durchweg hell gewählt, damit die
+   dunkle Beschriftung in jedem Schema darauf lesbar bleibt. */
+const PHASE_COLORS = {
+    kernel: '#64748b',
+    drivers: '#60a5fa',
+    devices: '#38bdf8',
+    prefetch: '#22d3ee',
+    smss: '#4ade80',
+    services: '#a3e635',
+    machineProfile: '#fbbf24',
+    userProfile: '#fcd34d',
+    explorer: '#fb923c',
+    other: '#94a3b8',
+    postBoot: '#f87171',
+};
+
+const BOOT_KINDS = {
+    cold: 'Kaltstart',
+    hybrid: 'Schnellstart',
+    resume: 'Ruhezustand',
+    unknown: 'unbekannt',
+};
+
+const STARTUP_COLUMNS = [
+    { key: 'name', label: 'Name', align: 'left', width: 210, help: 'Der Name des Registry-Werts, der Verknüpfung, der Aufgabe oder des Diensts.' },
+    { key: 'source', label: 'Herkunft', align: 'left', width: 130, help: 'Wer den Eintrag ausführt. Nur Run-Schlüssel und Startordner arbeitet der Explorer nacheinander ab — nur sie können die Kette blockieren.' },
+    { key: 'state', label: 'Zustand', align: 'left', width: 110, help: 'Ob der Eintrag ausgeführt wird, und was an ihm auffällt.' },
+    { key: 'seconds', label: 'Dauer', align: 'right', width: 76, help: 'Wie lange der Eintrag beim letzten Start die Autostart-Kette belegt hat. Leer, wenn er nicht ausgeführt wurde oder nicht in der Kette steht.' },
+    { key: 'pid', label: 'PID', align: 'right', width: 70, help: 'Die beim letzten Start vergebene Prozesskennung.' },
+    { key: 'publisher', label: 'Herausgeber', align: 'left', width: 160, help: 'Firma aus der Dateiversion — nicht aus der Signatur.' },
+    { key: 'command', label: 'Befehl', align: 'left', width: 420, help: 'Die hinterlegte Befehlszeile.' },
+];
+
+const HANDLE_COLUMNS = [
+    { key: 'pid', label: 'PID', align: 'right', width: 70, help: 'Prozesskennung.' },
+    { key: 'name', label: 'Prozess', align: 'left', width: 190, help: 'Name der ausführbaren Datei.' },
+    { key: 'total', label: 'Handles', align: 'right', width: 84, help: 'Alle offenen Handles zusammen. Eine Zahl, die über Stunden nur steigt, ist ein Leck.' },
+    { key: 'Datei', label: 'Dateien', align: 'right', width: 78, help: 'Handles auf Dateien, Pipes und Geräte.' },
+    { key: 'Registry', label: 'Registry', align: 'right', width: 78, help: 'Offene Registry-Schlüssel.' },
+    { key: 'Ereignis', label: 'Ereignisse', align: 'right', width: 84, help: 'Ereignisobjekte zur Synchronisierung.' },
+];
+
+function applyStartupWidths() {
+    applyColumnWidths(document.getElementById('startup-entries'), 'startup', STARTUP_COLUMNS);
+}
+
+function applyHandleWidths() {
+    applyColumnWidths(document.getElementById('handles-table'), 'handles', HANDLE_COLUMNS);
+}
+
+function renderColumnHead(target, tableKey, columns, apply) {
+    target.replaceChildren(...columns.map((column, index) => {
+        const th = document.createElement('th');
+        th.textContent = column.label;
+        th.className = column.align === 'right' ? 'num' : '';
+        th.title = `${column.help}\n\nDie rechte Kante ändert die Breite.`;
+
+        if (index < columns.length - 1) {
+            addResizeHandle(th, tableKey, columns, column, apply);
+        }
+
+        return th;
+    }));
+
+    apply();
+}
+
+/* Die Stellenzahl muss durchschlagen: die Startkette misst auf Hundertstel, und
+   ein Glied von 0,35 s als „0,4 s" zu zeigen nimmt der Zeitleiste genau die
+   Auflösung, wegen der sie da ist. nf1 hier zu benutzen ginge nicht — der
+   Formatierer hat seine Stellenzahl fest eingebaut. */
+function secondsText(value, digits = 1) {
+    if (value === null || value === undefined) {
+        return '–';
+    }
+    return `${value.toLocaleString('de-DE', {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+    })} s`;
+}
+
+function clockText(value) {
+    if (!value) {
+        return '–';
+    }
+    const total = Math.round(value);
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    return minutes > 0 ? `${minutes}:${String(seconds).padStart(2, '0')} min` : `${total} s`;
+}
+
+function dateText(value) {
+    if (!value) {
+        return '–';
+    }
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+        ? '–'
+        : date.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'medium' });
+}
+
+// ---------- Kacheln ----------
+
+function tile(label, value, sub, options = {}) {
+    const article = document.createElement('article');
+    article.className = 'tile';
+
+    const heading = document.createElement('h2');
+    heading.textContent = label;
+
+    const big = document.createElement('p');
+    big.className = options.word ? 'big word' : 'big';
+    big.textContent = value;
+
+    const hint = document.createElement('p');
+    hint.className = options.warn ? 'sub warn' : 'sub';
+    hint.textContent = sub;
+
+    if (options.title) {
+        article.title = options.title;
+    }
+
+    article.append(heading, big, hint);
+    return article;
+}
+
+function renderStartupTiles() {
+    const report = startupState.report;
+    if (!report) {
+        startup.tiles.replaceChildren();
+        return;
+    }
+
+    const performance = report.performance;
+    const tiles = [];
+
+    if (performance) {
+        // Was „üblich" war, steht nicht im Ereignis — wohl aber, um wie viel
+        // dieser Start davon abwich. Die Differenz ist die Vergleichszahl.
+        const usual = performance.degraded && performance.degradation > 0
+            ? performance.total - performance.degradation
+            : null;
+
+        tiles.push(tile('Startdauer', clockText(performance.total),
+            usual !== null
+                ? `üblich sind ${clockText(usual)} — ${nf1.format(performance.total / Math.max(usual, 0.1))}× langsamer`
+                : 'gemessen von Windows selbst',
+            { warn: performance.degraded, title: 'Ereignis 100 der Windows-Startleistungsüberwachung: die Zeit vom Einschalten bis zum Ende des Nachlaufs.' }));
+
+        tiles.push(tile('Hauptpfad', secondsText(performance.mainPath), 'bis der Desktop erscheint',
+            { title: 'Der Teil des Starts, den Windows abarbeiten muss, bevor der Anwender etwas sieht.' }));
+
+        tiles.push(tile('Nachlauf', secondsText(performance.postBoot), 'Autostart nach dem Desktop',
+            { title: 'Was nach dem Erscheinen des Desktops noch läuft — hier sitzen die Autostart-Programme.' }));
+    } else {
+        tiles.push(tile('Startdauer', '–', 'Startmessung nicht lesbar',
+            { warn: true, title: 'Das Protokoll „Diagnostics-Performance" ist zugriffsgeschützt und verlangt erhöhte Rechte.' }));
+    }
+
+    tiles.push(tile('Startart', BOOT_KINDS[report.bootKind] || 'unbekannt', dateText(report.powerOn),
+        { word: true, title: 'Aus Ereignis 27 von Microsoft-Windows-Kernel-Boot. Ein Schnellstart lädt die Kernelsitzung aus hiberfil.sys zurück, statt sie neu aufzubauen.' }));
+
+    const chainSeconds = report.chain.reduce((sum, item) => sum + (item.seconds || 0), 0);
+    const executed = report.chain.length;
+    const enabled = report.entries.filter(entry => entry.enabled && entry.source !== 'service').length;
+
+    tiles.push(tile('Autostart-Kette', secondsText(chainSeconds),
+        `${executed} ausgeführt · ${enabled} eingetragen`,
+        { title: 'Die Summe aller Glieder der Startkette. Der Explorer arbeitet sie nacheinander ab, die Zeiten addieren sich also wirklich.' }));
+
+    startup.tiles.replaceChildren(...tiles);
+}
+
+// ---------- Phasenband ----------
+
+function renderPhases() {
+    const performance = startupState.report?.performance;
+    const phases = performance?.phases || [];
+    startup.phasesPanel.hidden = phases.length === 0;
+
+    if (phases.length === 0) {
+        return;
+    }
+
+    const total = phases.reduce((sum, phase) => sum + phase.seconds, 0) || 1;
+
+    startup.phases.replaceChildren(...phases.map(phase => {
+        const cell = document.createElement('div');
+        const share = (phase.seconds / total) * 100;
+        cell.style.width = `${share}%`;
+        cell.style.background = PHASE_COLORS[phase.key] || PHASE_COLORS.other;
+        cell.title = `${phase.label}: ${secondsText(phase.seconds, 2)} (${nf1.format(share)} %)`;
+
+        // Unter etwa acht Prozent passt keine Beschriftung mehr hinein; die
+        // Farbe und die Legende darunter tragen sie dann allein.
+        if (share >= 8) {
+            cell.textContent = share >= 16 ? `${phase.label} ${secondsText(phase.seconds)}` : secondsText(phase.seconds);
+        }
+
+        return cell;
+    }));
+
+    startup.phaseLegend.replaceChildren(...phases.map(phase => {
+        const span = document.createElement('span');
+        const swatch = document.createElement('i');
+        swatch.style.background = PHASE_COLORS[phase.key] || PHASE_COLORS.other;
+        span.append(swatch, document.createTextNode(`${phase.label} ${secondsText(phase.seconds, 2)}`));
+        return span;
+    }));
+}
+
+// ---------- Befunde ----------
+
+function renderFindings() {
+    const all = startupState.report?.findings || [];
+    const rows = startupState.allFindings ? all : all.filter(finding => finding.severity !== 'hint');
+
+    startup.findingsEmpty.hidden = rows.length > 0;
+    startup.findings.replaceChildren(...rows.map(finding => {
+        const item = document.createElement('div');
+        item.className = 'finding';
+
+        const severity = document.createElement('span');
+        severity.className = `sev ${finding.severity}`;
+        severity.textContent = { high: 'schwer', medium: 'mittel', hint: 'Hinweis' }[finding.severity] || finding.severity;
+
+        const cost = document.createElement('span');
+        cost.className = `cost ${finding.severity}`;
+        cost.textContent = finding.seconds === null || finding.seconds === undefined
+            ? '–'
+            : secondsText(finding.seconds);
+
+        const body = document.createElement('div');
+
+        const title = document.createElement('p');
+        title.className = 'title';
+        title.textContent = finding.title;
+
+        const why = document.createElement('p');
+        why.className = 'why';
+        why.textContent = finding.why;
+
+        body.append(title, why);
+
+        if (finding.evidence) {
+            const evidence = document.createElement('p');
+            evidence.className = 'evidence';
+            evidence.textContent = finding.when
+                ? `${finding.evidence} · ${dateText(finding.when)}`
+                : finding.evidence;
+            body.append(evidence);
+        }
+
+        item.append(severity, cost, body);
+        return item;
+    }));
+}
+
+// ---------- Startkette ----------
+
+function renderChain() {
+    const chain = startupState.report?.chain || [];
+    startup.chainEmpty.hidden = chain.length > 0;
+
+    if (chain.length === 0) {
+        startup.chain.replaceChildren();
+        return;
+    }
+
+    const begin = Math.min(...chain.map(item => new Date(item.started).getTime()));
+    const end = Math.max(...chain.map(item =>
+        new Date(item.started).getTime() + (item.seconds || 0) * 1000));
+    const span = Math.max((end - begin) / 1000, 0.5);
+
+    const axis = document.createElement('div');
+    axis.className = 'gantt-axis';
+    axis.append(document.createElement('span'));
+
+    const ticks = document.createElement('div');
+    ticks.className = 'ticks';
+    for (let i = 0; i <= 5; i++) {
+        const label = document.createElement('span');
+        label.textContent = i === 0 ? '0 s' : nf1.format((span / 5) * i);
+        ticks.append(label);
+    }
+    axis.append(ticks, document.createElement('span'));
+
+    const rows = chain.map(item => {
+        const row = document.createElement('div');
+        row.className = 'gantt-row';
+
+        const name = document.createElement('span');
+        name.className = 'name';
+        name.textContent = item.command;
+        const origin = document.createElement('em');
+        origin.textContent = item.kind === 'runKey' ? 'Run' : 'Startordner';
+        name.append(origin);
+        name.title = `${item.command}\n${item.pid ? `PID ${item.pid}\n` : ''}${dateText(item.started)}`;
+
+        const track = document.createElement('div');
+        track.className = 'track';
+
+        const bar = document.createElement('div');
+        const offset = (new Date(item.started).getTime() - begin) / 1000;
+        const seconds = item.seconds || 0;
+        bar.className = seconds >= 8 ? 'bar bad' : seconds >= 2 ? 'bar slow' : 'bar';
+        bar.style.left = `${(offset / span) * 100}%`;
+        bar.style.width = `${Math.max((seconds / span) * 100, 0.4)}%`;
+        track.append(bar);
+
+        const duration = document.createElement('span');
+        duration.className = 'dur';
+        duration.textContent = item.seconds === null || item.seconds === undefined
+            ? 'offen'
+            : secondsText(item.seconds, 2);
+
+        row.append(name, track, duration);
+        return row;
+    });
+
+    // Die Anmeldeaufgaben der Shell laufen zu Dutzenden und je wenige
+    // Millisekunden; einzeln wären sie sechzig Striche ohne Aussage. Ihre Zahl
+    // gehört trotzdem hin, sonst fehlte ein Stück der Kette ohne Erklärung.
+    if (startupState.report.logonTasks > 0) {
+        const note = document.createElement('div');
+        note.className = 'gantt-row';
+        const label = document.createElement('span');
+        label.className = 'name';
+        label.style.color = 'var(--muted)';
+        label.textContent = `… dazu ${startupState.report.logonTasks} Anmeldeaufgaben der Shell`;
+        label.title = 'Kurze Aufgaben, die der Explorer beim Anmelden abarbeitet (Shell-Core 62170/62171). Je wenige Millisekunden — einzeln aufgeführt verstopfen sie die Zeitleiste.';
+        note.append(label, document.createElement('div'), document.createElement('span'));
+        rows.push(note);
+    }
+
+    startup.chain.replaceChildren(axis, ...rows);
+}
+
+// ---------- Autostart-Tabelle ----------
+
+const ISSUE_LABELS = {
+    MissingFile: 'Datei fehlt',
+    EmptyCommand: 'leer',
+    NetworkPath: 'Netzpfad',
+    RemovablePath: 'Wechselmedium',
+    TempPath: 'aus %TEMP%',
+    Timeout: 'Zeitlimit',
+    SlowStart: 'langsam',
+    NotRunning: 'läuft nicht',
+    DelayedStart: 'verzögert',
+};
+
+/* „Läuft nicht" und „verzögert" sind bei einem Dienst der Normalfall und keine
+   Auffälligkeit — sie sollen den Filter „Nur Auffällige" nicht auslösen und die
+   Zeile nicht einfärben. */
+const BENIGN_ISSUES = new Set(['NotRunning', 'DelayedStart']);
+
+function issuesOf(entry) {
+    return entry.issues ? entry.issues.split(', ') : [];
+}
+
+function isFlagged(entry) {
+    return issuesOf(entry).some(issue => !BENIGN_ISSUES.has(issue));
+}
+
+function visibleStartupEntries() {
+    const needle = startupState.filter.toLowerCase();
+
+    return (startupState.report?.entries || []).filter(entry => {
+        if (!startupState.withServices && entry.source === 'service') {
+            return false;
+        }
+        if (!startupState.withDisabled && !entry.enabled) {
+            return false;
+        }
+        if (startupState.onlyIssues && !isFlagged(entry)) {
+            return false;
+        }
+        if (!needle) {
+            return true;
+        }
+
+        return [entry.name, entry.sourceLabel, entry.command, entry.path, entry.publisher, entry.description, entry.detail]
+            .some(field => field && field.toLowerCase().includes(needle));
+    });
+}
+
+function renderStartupEntries() {
+    const rows = visibleStartupEntries();
+    const total = startupState.report?.entries.length || 0;
+    startup.count.textContent = `${rows.length} von ${total} Einträgen`;
+
+    // Die gemessenen zuerst, danach die eingeschalteten, dann alphabetisch: die
+    // Frage lautet „was hat gekostet", und die Antwort soll oben stehen.
+    rows.sort((a, b) => {
+        const left = a.seconds ?? -1;
+        const right = b.seconds ?? -1;
+        if (left !== right) {
+            return right - left;
+        }
+        if (a.enabled !== b.enabled) {
+            return a.enabled ? -1 : 1;
+        }
+        return a.name.localeCompare(b.name, 'de');
+    });
+
+    startup.entriesBody.replaceChildren(...rows.map(entry => {
+        const tr = document.createElement('tr');
+        const issues = issuesOf(entry);
+        const flagged = isFlagged(entry);
+
+        if (!entry.enabled) {
+            tr.classList.add('off');
+        }
+        if (flagged && entry.enabled) {
+            tr.classList.add('flagged');
+        }
+
+        for (const column of STARTUP_COLUMNS) {
+            const td = document.createElement('td');
+            if (column.align === 'right') {
+                td.className = 'num';
+            }
+
+            if (column.key === 'name') {
+                td.textContent = entry.name;
+                td.title = [entry.name, entry.description, entry.path]
+                    .filter(Boolean).join('\n');
+            } else if (column.key === 'source') {
+                td.textContent = entry.sourceLabel;
+                if (entry.detail) {
+                    td.title = entry.detail;
+                }
+            } else if (column.key === 'state') {
+                const pill = document.createElement('span');
+                if (flagged) {
+                    pill.className = 'pill err';
+                    pill.textContent = issues
+                        .filter(issue => !BENIGN_ISSUES.has(issue))
+                        .map(issue => ISSUE_LABELS[issue] || issue)
+                        .join(', ');
+                } else if (entry.enabled) {
+                    pill.className = 'pill on';
+                    pill.textContent = issues.length
+                        ? issues.map(issue => ISSUE_LABELS[issue] || issue).join(', ')
+                        : 'aktiv';
+                } else {
+                    pill.className = 'pill';
+                    pill.textContent = 'abgeschaltet';
+                    if (entry.disabledAt) {
+                        pill.title = `Abgeschaltet am ${dateText(entry.disabledAt)}`;
+                    }
+                }
+                td.append(pill);
+            } else if (column.key === 'seconds') {
+                td.textContent = entry.seconds === null || entry.seconds === undefined
+                    ? ''
+                    : secondsText(entry.seconds, 2);
+                if (entry.seconds >= 2) {
+                    td.style.color = entry.seconds >= 8 ? '#f87171' : 'var(--notice)';
+                    td.style.fontWeight = '600';
+                }
+            } else if (column.key === 'pid') {
+                td.textContent = entry.pid || '';
+            } else if (column.key === 'publisher') {
+                td.textContent = entry.publisher || '';
+            } else {
+                td.className = 'mono';
+                td.textContent = entry.command;
+                td.title = entry.command;
+            }
+
+            tr.append(td);
+        }
+
+        return tr;
+    }));
+}
+
+// ---------- Startaufzeichnung ----------
+
+function traceButton(label, action, title) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'toggle';
+    button.textContent = label;
+    if (title) {
+        button.title = title;
+    }
+    button.addEventListener('click', () => {
+        startup.traceBody.querySelectorAll('button').forEach(other => { other.disabled = true; });
+        send('bootTrace', { key: action });
+    });
+    return button;
+}
+
+function renderTrace() {
+    const trace = startupState.trace;
+    if (!trace) {
+        startup.traceBody.replaceChildren();
+        return;
+    }
+
+    const parts = [];
+
+    const state = document.createElement('p');
+    state.className = 'state';
+    state.textContent = trace.message;
+    parts.push(state);
+
+    if (trace.state === 'idle') {
+        const warning = document.createElement('p');
+        warning.className = 'warning';
+        warning.textContent = trace.warning;
+        parts.push(warning);
+    }
+
+    if (trace.state === 'armed') {
+        const hint = document.createElement('p');
+        hint.className = 'warning';
+        hint.textContent = 'Jetzt neu starten. Nach dem Neustart erscheint hier die Schaltfläche zum Beenden der Aufzeichnung — erst dann wird die Datei geschrieben.';
+        parts.push(hint);
+    }
+
+    if (trace.state === 'recorded' && trace.sizeBytes) {
+        const file = document.createElement('p');
+        file.className = 'warning';
+        file.textContent = `${trace.path} — ${formatBytes(trace.sizeBytes)}. Zum Auswerten in den Windows Performance Analyzer laden.`;
+        parts.push(file);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'trace-actions';
+
+    if (trace.state === 'idle') {
+        actions.append(traceButton('Für den nächsten Start scharfstellen', 'arm',
+            'Richtet einen Autologger ein. Der Neustart wird nicht ausgelöst.'));
+    } else if (trace.state === 'armed') {
+        actions.append(traceButton('Doch nicht — zurücknehmen', 'cancel'));
+    } else if (trace.state === 'recording') {
+        actions.append(traceButton('Aufzeichnung beenden und sichern', 'stop',
+            'Hält den Autologger an und schreibt die Spur. Das kann eine Minute dauern.'));
+        actions.append(traceButton('Verwerfen', 'cancel'));
+    } else if (trace.state === 'recorded') {
+        const reveal = document.createElement('button');
+        reveal.type = 'button';
+        reveal.className = 'toggle';
+        reveal.textContent = 'Im Explorer zeigen';
+        reveal.addEventListener('click', () => send('openTrace'));
+        actions.append(reveal, traceButton('Aus der Anzeige nehmen', 'forget',
+            'Vergisst die Aufzeichnung hier. Die Datei bleibt liegen.'));
+    }
+
+    /* Windows legt bei jedem Hochfahren selbst eine Startaufzeichnung an. Sie
+       ist gröber als eine eigene, aber sie ist schon da — ohne Neustart, ohne
+       halbes Gigabyte. Deshalb steht sie hier immer zur Wahl, unabhängig davon,
+       ob eine eigene Aufzeichnung eingerichtet ist. */
+    if (trace.windowsTrace) {
+        const own = document.createElement('button');
+        own.type = 'button';
+        own.className = 'toggle';
+        own.textContent = 'Letzten Start auswerten (ohne Neustart)';
+        own.title = 'Wertet %windir%\\System32\\WDI\\LogFiles\\BootPerfDiagLogger.etl aus — die Aufzeichnung, die Windows bei jedem Hochfahren selbst anlegt. Das Lesen dauert je nach Größe einige Sekunden.';
+        own.addEventListener('click', () => {
+            startup.traceWrap.hidden = true;
+            startup.traceBody.querySelectorAll('button').forEach(other => { other.disabled = true; });
+            send('analyzeTrace', { key: 'windows' });
+        });
+        actions.append(own);
+    }
+
+    if (trace.state === 'recorded') {
+        const analyze = document.createElement('button');
+        analyze.type = 'button';
+        analyze.className = 'toggle';
+        analyze.textContent = 'Eigene Aufzeichnung auswerten';
+        analyze.addEventListener('click', () => {
+            startup.traceWrap.hidden = true;
+            send('analyzeTrace', { key: 'own' });
+        });
+        actions.append(analyze);
+    }
+
+    if (actions.childElementCount > 0) {
+        parts.push(actions);
+    }
+
+    if (trace.error) {
+        const error = document.createElement('p');
+        error.className = 'error';
+        error.textContent = trace.error;
+        parts.push(error);
+    }
+
+    startup.traceBody.replaceChildren(...parts);
+}
+
+const TRACE_COLUMNS = [
+    { key: 'name', label: 'Prozess', align: 'left', width: 220, help: 'Name der ausführbaren Datei während des Starts.' },
+    { key: 'cpuMs', label: 'Rechenzeit', align: 'right', width: 100, help: 'Aus den Abtastungen des Kernels geschätzt — eine Abtastung entspricht rund einer CPU-Millisekunde auf einem Kern.' },
+    { key: 'readBytes', label: 'Gelesen', align: 'right', width: 100, help: 'Vom Datenträger gelesen.' },
+    { key: 'writeBytes', label: 'Geschrieben', align: 'right', width: 100, help: 'Auf den Datenträger geschrieben.' },
+    { key: 'operations', label: 'Zugriffe', align: 'right', width: 90, help: 'Zahl der Datenträgerzugriffe. Auf einer Festplatte sagt sie mehr über die Bremswirkung aus als die Menge.' },
+    { key: 'startMs', label: 'Start bei', align: 'right', width: 90, help: 'Abstand vom Beginn der Aufzeichnung bis zum Start des Prozesses. „vorher" heißt, er lief schon.' },
+    { key: 'pid', label: 'PID', align: 'right', width: 70, help: 'Prozesskennung während des Starts.' },
+];
+
+function applyTraceWidths() {
+    applyColumnWidths(document.getElementById('trace-summary'), 'trace', TRACE_COLUMNS);
+}
+
+function renderTraceSummary(data) {
+    // Die Schaltflächen sind für die Dauer der Auswertung gesperrt; der Zustand
+    // wird über das Neuzeichnen zurückgeholt.
+    renderTrace();
+
+    if (!data.available || data.error) {
+        startup.traceWrap.hidden = true;
+        if (data.error) {
+            const error = document.createElement('p');
+            error.className = 'error';
+            error.textContent = `Die Aufzeichnung ließ sich nicht auswerten: ${data.error}`;
+            startup.traceBody.append(error);
+        }
+        return;
+    }
+
+    /* Der Zeitstempel der ETW-Sitzung ist bei Windows' eigener Aufzeichnung
+       nicht verlässlich — gemessen lag er ein Jahr vor dem letzten Start. Die
+       Änderungszeit der Datei sagt, welchen Start man vor sich hat. */
+    const note = document.createElement('p');
+    note.className = 'warning';
+    note.textContent = `${data.fromWindows ? 'Aufzeichnung von Windows' : 'Eigene Aufzeichnung'}, Datei vom ${dateText(data.fileTime)} · ${secondsText(data.seconds)} · ${nf0.format(data.samples)} Abtastungen.`;
+    startup.traceBody.append(note);
+
+    /* Der wichtigste Vorbehalt zuerst: Windows' Startdiagnose läuft nicht bei
+       jedem Hochfahren. Auf der Referenzmaschine war die Datei ein Jahr alt —
+       ohne diesen Hinweis sucht man die Ursache eines heutigen Problems in
+       Zahlen, die es damals noch nicht gab. */
+    if (!data.fromLastBoot) {
+        const stale = document.createElement('p');
+        stale.className = 'error';
+        stale.textContent = 'Diese Aufzeichnung stammt nicht vom letzten Start. Die Startdiagnose von Windows läuft nicht bei jedem Hochfahren — die Zahlen unten zeigen einen früheren Start. Für den aktuellen hilft nur eine eigene Aufzeichnung.';
+        startup.traceBody.append(stale);
+    }
+
+    /* Ohne Profilablaufverfolgung bleibt die CPU-Spalte leer. Das ist kein
+       Fehler, sondern eine Eigenschaft der Quelle — und es gehört gesagt, sonst
+       liest sich eine Spalte voller Nullen wie eine Messung. */
+    if (!data.hasCpu) {
+        const missing = document.createElement('p');
+        missing.className = 'warning';
+        missing.textContent = data.fromWindows
+            ? 'Diese Aufzeichnung enthält keine CPU-Abtastungen — der Diagnoserichtliniendienst schaltet die Profilablaufverfolgung nicht ein. Datenträgerzugriffe und Startzeitpunkte stimmen; für die Rechenzeit braucht es eine eigene Aufzeichnung.'
+            : 'Diese Aufzeichnung enthält keine CPU-Abtastungen. Datenträgerzugriffe und Startzeitpunkte stimmen.';
+        startup.traceBody.append(missing);
+    }
+
+    startup.traceWrap.hidden = false;
+    startup.traceRows.replaceChildren(...(data.processes || []).map(row => {
+        const tr = document.createElement('tr');
+
+        for (const column of TRACE_COLUMNS) {
+            const td = document.createElement('td');
+            if (column.align === 'right') {
+                td.className = 'num';
+            }
+
+            if (column.key === 'name') {
+                td.textContent = row.name;
+            } else if (column.key === 'cpuMs') {
+                td.textContent = data.hasCpu ? secondsText(row.cpuMs / 1000, 2) : '';
+            } else if (column.key === 'readBytes' || column.key === 'writeBytes') {
+                td.textContent = row[column.key] ? formatBytes(row[column.key]) : '';
+            } else if (column.key === 'operations') {
+                td.textContent = row.operations ? nf0.format(row.operations) : '';
+            } else if (column.key === 'startMs') {
+                td.textContent = row.startMs === null || row.startMs === undefined
+                    ? 'vorher'
+                    : secondsText(row.startMs / 1000, 1);
+            } else {
+                td.textContent = row.pid;
+            }
+
+            tr.append(td);
+        }
+
+        return tr;
+    }));
+}
+
+// ---------- Handles und Wartekette ----------
+
+function renderHandles() {
+    const data = startupState.handles;
+    startup.handlesEmpty.hidden = Boolean(data);
+
+    if (!data) {
+        startup.handlesBody.replaceChildren();
+        return;
+    }
+
+    startup.handlesStatus.textContent =
+        `${nf0.format(data.total)} Handles insgesamt · ${dateText(data.collectedAt)}`;
+
+    startup.handlesBody.replaceChildren(...data.processes.map(row => {
+        const tr = document.createElement('tr');
+        tr.classList.toggle('selected', row.pid === startupState.selectedPid);
+        tr.addEventListener('click', () => {
+            startupState.selectedPid = row.pid;
+            startup.inspect.replaceChildren(Object.assign(document.createElement('p'), {
+                className: 'startup-empty',
+                textContent: `Wird untersucht: ${row.name || row.pid} …`,
+            }));
+            renderHandles();
+            send('inspectProcess', { pid: row.pid, name: row.name });
+        });
+
+        for (const column of HANDLE_COLUMNS) {
+            const td = document.createElement('td');
+            if (column.align === 'right') {
+                td.className = 'num';
+            }
+
+            if (column.key === 'pid') {
+                td.textContent = row.pid;
+            } else if (column.key === 'name') {
+                td.textContent = row.name || '–';
+            } else if (column.key === 'total') {
+                td.textContent = nf0.format(row.total);
+            } else {
+                const value = row.byType?.[column.key];
+                td.textContent = value ? nf0.format(value) : '';
+            }
+
+            tr.append(td);
+        }
+
+        return tr;
+    }));
+}
+
+const WAIT_TYPES = {
+    criticalSection: 'kritischer Abschnitt',
+    sendMessage: 'Fensternachricht',
+    mutex: 'Mutex',
+    alpc: 'ALPC-Anfrage',
+    com: 'COM-Aufruf',
+    threadWait: 'Warten auf Thread',
+    processWait: 'Warten auf Prozess',
+    thread: 'Thread',
+    comActivation: 'COM-Aktivierung',
+    unknown: 'unbekannt',
+};
+
+const WAIT_STATUS = {
+    noAccess: 'kein Zugriff',
+    running: 'läuft',
+    blocked: 'blockiert',
+    pidOnly: 'nur PID bekannt',
+    pidOnlyRpcss: 'nur PID bekannt (RPCSS)',
+    owned: 'gehalten',
+    notOwned: 'frei',
+    abandoned: 'verwaist',
+    unknown: 'unbekannt',
+    error: 'Fehler',
+};
+
+function renderInspect(data) {
+    const parts = [];
+
+    const heading = document.createElement('h4');
+    heading.textContent = `${data.name || 'Prozess'} · PID ${data.pid}`;
+    parts.push(heading);
+
+    if (data.cycle) {
+        const cycle = document.createElement('p');
+        cycle.className = 'wait-cycle';
+        cycle.textContent = 'Die Kette bildet einen Ring: eine echte Verklemmung. Diese Threads warten wechselseitig aufeinander und kommen ohne Eingriff nicht mehr weiter.';
+        parts.push(cycle);
+    }
+
+    if (data.chain && data.chain.length > 0) {
+        for (const node of data.chain) {
+            const item = document.createElement('div');
+            item.className = 'wait-node';
+            if (data.cycle) {
+                item.classList.add('cycle');
+            } else if (node.status === 'blocked') {
+                item.classList.add('blocked');
+            }
+
+            const what = document.createElement('div');
+            what.className = 'what';
+            what.textContent = node.objectType === 'thread'
+                ? `Thread ${node.threadId} in PID ${node.pid}`
+                : `${WAIT_TYPES[node.objectType] || node.objectType}${node.objectName ? ` „${node.objectName}"` : ''}`;
+
+            const meta = document.createElement('div');
+            meta.className = 'meta';
+            meta.textContent = [
+                WAIT_STATUS[node.status] || node.status,
+                node.waitMs ? `wartet seit ${clockText(node.waitMs / 1000)}` : null,
+            ].filter(Boolean).join(' · ');
+
+            item.append(what, meta);
+            parts.push(item);
+        }
+    } else {
+        const none = document.createElement('p');
+        none.className = 'startup-empty';
+        none.textContent = 'Keine Wartekette. Der Prozess blockiert auf nichts, was sich benennen lässt — er arbeitet entweder oder wartet auf etwas außerhalb der Reichweite dieser Abfrage (Netzwerk, Treiber, Datenträger).';
+        parts.push(none);
+    }
+
+    const filesHeading = document.createElement('h4');
+    const named = (data.files || []).filter(file => file.name);
+    filesHeading.textContent = `Offene Dateien (${named.length})`;
+    parts.push(filesHeading);
+
+    if (named.length > 0) {
+        const list = document.createElement('div');
+        list.className = 'file-list';
+        list.textContent = named.map(file => file.name).join('\n');
+        list.style.whiteSpace = 'pre-wrap';
+        parts.push(list);
+    } else {
+        const none = document.createElement('p');
+        none.className = 'startup-empty';
+        none.textContent = data.files
+            ? 'Keine benannten Dateihandles. Pipes und Zeichengeräte werden bewusst nicht abgefragt — die Namensabfrage blockiert dort dauerhaft.'
+            : 'Die Handles ließen sich nicht lesen. Geschützte Prozesse geben sie auch Administratoren nicht heraus.';
+        parts.push(none);
+    }
+
+    startup.inspect.replaceChildren(...parts);
+}
+
+// ---------- Bericht ----------
+
+/* Der Bericht ist der Grund, warum dieser Reiter auch auf einem fremden Rechner
+   nützt: wer ein Startproblem untersucht, sitzt selten davor. Als Text lässt es
+   sich in eine Nachricht kleben. */
+function buildReport() {
+    const report = startupState.report;
+    if (!report) {
+        return '';
+    }
+
+    const lines = [];
+    lines.push('ResMon — Analyse des Systemstarts');
+    lines.push(`Erhoben:       ${dateText(report.collectedAt)}`);
+    lines.push(`Eingeschaltet: ${dateText(report.powerOn)} (${BOOT_KINDS[report.bootKind] || report.bootKind})`);
+    lines.push(`Angemeldet:    ${dateText(report.sessionStart)}`);
+    lines.push('');
+
+    if (report.performance) {
+        const performance = report.performance;
+        lines.push('Startmessung von Windows');
+        lines.push(`  Gesamt:    ${secondsText(performance.total)}`);
+        lines.push(`  Hauptpfad: ${secondsText(performance.mainPath)}`);
+        lines.push(`  Nachlauf:  ${secondsText(performance.postBoot)}`);
+        if (performance.degraded) {
+            lines.push(`  Davon ${secondsText(performance.degradation)} langsamer als sonst.`);
+        }
+        lines.push('');
+        for (const phase of performance.phases) {
+            lines.push(`  ${phase.label.padEnd(22)} ${secondsText(phase.seconds, 2)}`);
+        }
+        lines.push('');
+    } else {
+        lines.push('Startmessung von Windows: nicht lesbar.');
+        lines.push('');
+    }
+
+    lines.push(`Befunde (${report.findings.length})`);
+    for (const finding of report.findings) {
+        const cost = finding.seconds === null || finding.seconds === undefined
+            ? '   –   '
+            : secondsText(finding.seconds).padStart(7);
+        lines.push(`  [${finding.severity}] ${cost}  ${finding.title}`);
+        lines.push(`            ${finding.why}`);
+        if (finding.evidence) {
+            lines.push(`            Beleg: ${finding.evidence}`);
+        }
+    }
+    lines.push('');
+
+    lines.push(`Startkette (${report.chain.length} Glieder, ${report.logonTasks} Anmeldeaufgaben)`);
+    for (const item of report.chain) {
+        lines.push(`  ${secondsText(item.seconds, 2).padStart(9)}  ${item.command}`);
+    }
+    lines.push('');
+
+    const flagged = report.entries.filter(entry => entry.enabled && isFlagged(entry));
+    lines.push(`Auffällige Autostart-Einträge (${flagged.length})`);
+    for (const entry of flagged) {
+        lines.push(`  ${entry.sourceLabel.padEnd(20)} ${entry.name}  [${entry.issues}]`);
+        lines.push(`    ${entry.command}`);
+    }
+    lines.push('');
+
+    lines.push('Einschränkungen');
+    for (const note of report.limitations) {
+        lines.push(`  - ${note}`);
+    }
+
+    return lines.join('\n');
+}
+
+async function copyReport() {
+    const text = buildReport();
+    if (!text) {
+        return;
+    }
+
+    try {
+        await navigator.clipboard.writeText(text);
+        startup.status.textContent = 'Bericht in der Zwischenablage.';
+    } catch {
+        // Ohne Berechtigung für die Zwischenablage bleibt der alte Weg über ein
+        // ausgewähltes Textfeld.
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.append(area);
+        area.select();
+        const ok = document.execCommand('copy');
+        area.remove();
+        startup.status.textContent = ok
+            ? 'Bericht in der Zwischenablage.'
+            : 'Der Bericht ließ sich nicht kopieren.';
+    }
+}
+
+// ---------- Zusammenbau ----------
+
+function renderStartup() {
+    renderStartupTiles();
+    renderPhases();
+    renderFindings();
+    renderChain();
+    renderStartupEntries();
+    renderTrace();
+
+    const limits = startupState.report?.limitations || [];
+    startup.limitsPanel.hidden = limits.length === 0;
+    startup.limits.replaceChildren(...limits.map(note => {
+        const li = document.createElement('li');
+        li.textContent = note;
+        return li;
+    }));
+}
+
+function requestStartup() {
+    startupState.requested = true;
+    startup.refresh.disabled = true;
+    startup.status.textContent = 'Wird erhoben — Ereignisprotokolle, Registry und Aufgabenplanung …';
+    send('requestStartup');
+}
+
+startup.refresh.addEventListener('click', requestStartup);
+startup.copy.addEventListener('click', copyReport);
+startup.handlesRefresh.addEventListener('click', () => {
+    startup.handlesStatus.textContent = 'Wird gezählt …';
+    send('requestHandles');
+});
+
+startup.filter.addEventListener('input', event => {
+    startupState.filter = event.target.value.trim();
+    renderStartupEntries();
+});
+
+startup.withServices.addEventListener('change', event => {
+    startupState.withServices = event.target.checked;
+    renderStartupEntries();
+});
+
+startup.withDisabled.addEventListener('change', event => {
+    startupState.withDisabled = event.target.checked;
+    renderStartupEntries();
+});
+
+startup.onlyIssues.addEventListener('change', event => {
+    startupState.onlyIssues = event.target.checked;
+    renderStartupEntries();
+});
+
+startup.allFindings.addEventListener('change', event => {
+    startupState.allFindings = event.target.checked;
+    renderFindings();
+});
+
+renderColumnHead(startup.entriesHead, 'startup', STARTUP_COLUMNS, applyStartupWidths);
+renderColumnHead(startup.handlesHead, 'handles', HANDLE_COLUMNS, applyHandleWidths);
+renderColumnHead(startup.traceHead, 'trace', TRACE_COLUMNS, applyTraceWidths);
