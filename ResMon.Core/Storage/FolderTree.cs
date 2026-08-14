@@ -216,6 +216,91 @@ public sealed class FolderScanResult
         return Path.Join([.. segments]);
     }
 
+    /// <summary>Die Summe eines Knotens, gleich ob Ordner oder Großdatei.</summary>
+    public long BytesOf(int id)
+    {
+        if (!IsKnown(id))
+            return 0;
+
+        return id >= _dirCount ? _files[id - _dirCount].Bytes : Node(id).TotalBytes;
+    }
+
+    /// <summary>
+    /// Sucht einen Knoten über seinen Pfad. Gibt die Kennung zurück oder
+    /// <c>-1</c>, wenn der Pfad nicht im Baum steht.
+    /// </summary>
+    /// <remarks>
+    /// Die Umkehrung von <see cref="PathOf"/> und die Grundlage für die Befunde:
+    /// eine Regel nennt einen bekannten Ort, und der wird hier nachgeschlagen,
+    /// statt den Baum danach abzusuchen. Der Weg führt über die Namenssegmente
+    /// und kostet damit die Tiefe des Pfades mal die Geschwisterzahl je Ebene —
+    /// ein Bruchteil eines Durchlaufs über eine Viertelmillion Knoten.
+    /// <para>
+    /// Ein Pfad außerhalb der durchsuchten Wurzel findet nichts. Das ist kein
+    /// Fehler, sondern der Regelfall: der Scan lief auf einer Partition, die
+    /// gesuchte Anwendung liegt auf einer anderen.
+    /// </para>
+    /// </remarks>
+    public int FindByPath(string path)
+    {
+        if (_dirCount == 0 || string.IsNullOrWhiteSpace(path))
+            return -1;
+
+        string trimmed = path.TrimEnd('\\', '/');
+        string root = Root.TrimEnd('\\', '/');
+
+        if (!trimmed.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            return -1;
+
+        if (trimmed.Length == root.Length)
+            return 0;
+
+        // Nach der Wurzel muss ein Trennzeichen folgen — sonst träfe „C:\Programme“
+        // auch auf eine Wurzel „C:\Prog“ zu.
+        if (trimmed[root.Length] is not ('\\' or '/'))
+            return -1;
+
+        int current = 0;
+        foreach (string segment in trimmed[(root.Length + 1)..]
+                     .Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = ChildByName(current, segment);
+            if (current < 0)
+                return -1;
+        }
+
+        return current;
+    }
+
+    /// <summary>
+    /// Das Kind eines Ordners mit diesem Namen — Unterordner zuerst, danach die
+    /// Großdateien. Beide liegen zusammenhängend, die Suche ist deshalb ein Lauf
+    /// über einen Ausschnitt und keine Wörterbuchabfrage.
+    /// </summary>
+    private int ChildByName(int parent, string name)
+    {
+        if (parent < 0 || parent >= _dirCount)
+            return -1;
+
+        ref DirNode node = ref Node(parent);
+
+        for (int i = 0; i < node.ChildCount; i++)
+        {
+            int childId = node.FirstChild + i;
+            if (string.Equals(Node(childId).Name, name, StringComparison.OrdinalIgnoreCase))
+                return childId;
+        }
+
+        for (int i = 0; i < node.FileNodeCount; i++)
+        {
+            int fileIndex = node.FirstFile + i;
+            if (string.Equals(_files[fileIndex].Name, name, StringComparison.OrdinalIgnoreCase))
+                return _dirCount + fileIndex;
+        }
+
+        return -1;
+    }
+
     /// <summary>
     /// Der Auszug für die erste Nutzlast: größensortierte Breitensuche, bis das
     /// Budget voll ist. „Größtes zuerst" ist genau die Reihenfolge, die eine

@@ -37,8 +37,20 @@ public partial class DetailWindow : Window
     private DispatcherTimer? _scanProgress;
     private int _scanId;
 
+    /// <summary>Hält den freien Platz der Laufwerke aktuell, solange das Fenster offen ist.</summary>
+    private DispatcherTimer? _volumeTimer;
+
+    /// <summary>
+    /// Läuft eine Abfrage noch? Ein hängender Wechseldatenträger würde sonst je
+    /// Takt eine weitere Aufgabe anstoßen, bis keine mehr frei ist.
+    /// </summary>
+    private bool _volumeBusy;
+
     /// <summary>Läuft gerade eine Startanalyse? Ein zweiter Aufruf wird verworfen.</summary>
     private bool _startupBusy;
+
+    /// <summary>Läuft gerade eine Programm-Inventur? Aus demselben Grund abgewiesen.</summary>
+    private bool _programsBusy;
 
     /// <summary>
     /// So viele Zeilen bekommt die Handle-Liste. Auf einem laufenden System haben
@@ -91,6 +103,8 @@ public partial class DetailWindow : Window
             // noch lud.
             if (_systemInfo is { } pending)
                 PushSystemInfo(pending);
+
+            StartVolumeTimer();
         }
         catch (Exception ex)
         {
@@ -183,6 +197,12 @@ public partial class DetailWindow : Window
             case "requestStartup":
                 RunStartupAnalysis();
                 break;
+            case "requestPrograms":
+                RunProgramInventory();
+                break;
+            case "copyText" when command.Name is { } text:
+                PathActions.Copy(this, text);
+                break;
             case "bootTrace" when command.Key is { } action:
                 ApplyBootTrace(action);
                 break;
@@ -237,6 +257,7 @@ public partial class DetailWindow : Window
         // eine geschlossene WebView wirft.
         _webReady = false;
         _scanProgress?.Stop();
+        _volumeTimer?.Stop();
 
         FolderScanSession? session = _scan;
         _scan = null;
@@ -261,6 +282,48 @@ public partial class DetailWindow : Window
     /// „Neu erheben“ ist schnell zweimal gedrückt, und zwei Läufe lieferten
     /// dasselbe Ergebnis.
     /// </remarks>
+    /// <summary>
+    /// Erhebt das Programm-Inventar im Hintergrund.
+    /// </summary>
+    /// <remarks>
+    /// Die Erhebung liest drei Registry-Zweige, den Prefetch-Ordner und
+    /// UserAssist — und misst anschließend Installationsordner. Liegt das
+    /// Ergebnis eines Ordner-Scans vor, kommen die Größen daraus und die Messung
+    /// entfällt; das ist der Unterschied zwischen einer halben Sekunde und
+    /// mehreren. Deshalb bekommt die Inventur den letzten Baum mit, statt sich
+    /// einen eigenen zu holen.
+    /// </remarks>
+    private void RunProgramInventory()
+    {
+        if (_programsBusy)
+            return;
+
+        _programsBusy = true;
+
+        // Der Baum wird auf dem UI-Thread abgegriffen: _scan gehört ihm, und ein
+        // Zugriff aus dem Hintergrund liefe gegen einen Lauf, der gerade endet.
+        FolderScanResult? scan = _scan?.Result;
+
+        _ = Task.Run(() => ProgramInventory.Collect(scan, CancellationToken.None))
+            .ContinueWith(
+                task => Dispatcher.BeginInvoke(() =>
+                {
+                    _programsBusy = false;
+                    if (!_webReady)
+                        return;
+
+                    if (task.IsFaulted)
+                    {
+                        DiagnosticLog.Report("Programm-Inventar", task.Exception!.GetBaseException(),
+                            "Die Erhebung der installierten Programme ist fehlgeschlagen");
+                        return;
+                    }
+
+                    Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildProgramsPayload(task.Result));
+                }),
+                TaskScheduler.Default);
+    }
+
     private void RunStartupAnalysis()
     {
         if (_startupBusy)
@@ -512,6 +575,58 @@ public partial class DetailWindow : Window
         // durch den Synchronisierungskontext.
         _scanProgress ??= CreateProgressTimer();
         _scanProgress.Start();
+    }
+
+    /// <summary>
+    /// Hält den freien Platz je Laufwerk aktuell, solange das Detailfenster offen
+    /// ist.
+    /// </summary>
+    /// <remarks>
+    /// Der Ordner-Scan bleibt ohne Takt (DESIGN.md §9) — er läuft Minuten. Die
+    /// Kapazität eines Laufwerks ist dagegen ein Wert, den das Dateisystem
+    /// mitführt; sie zu lesen kostet je Laufwerk Mikrosekunden. Wer aufräumt,
+    /// will den freien Platz wachsen sehen, ohne die Partition erneut zu
+    /// durchlaufen.
+    /// <para>
+    /// Zwei Sekunden, nicht eine: die Zahl ändert sich sprunghaft beim Löschen
+    /// und sonst gar nicht, und ein Wert, der viermal je Sekunde zuckt, liest
+    /// sich schlechter als einer, der steht. Gelesen wird trotzdem im
+    /// Hintergrund — ein Wechseldatenträger kann beim Abfragen hängen, und das
+    /// darf die Oberfläche nicht anhalten.
+    /// </para>
+    /// </remarks>
+    private void StartVolumeTimer()
+    {
+        _volumeTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(2),
+        };
+
+        _volumeTimer.Tick += (_, _) => PushVolumes();
+        _volumeTimer.Start();
+
+        // Der erste Stand sofort, sonst stünde die Auswahl zwei Sekunden lang
+        // auf den Zahlen der Systemübersicht.
+        PushVolumes();
+    }
+
+    private void PushVolumes()
+    {
+        if (!_webReady || _volumeBusy)
+            return;
+
+        _volumeBusy = true;
+
+        _ = Task.Run(VolumeSpace.Read).ContinueWith(
+            task => Dispatcher.BeginInvoke(() =>
+            {
+                _volumeBusy = false;
+                if (!_webReady || task.IsFaulted)
+                    return;
+
+                Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildVolumesPayload(task.Result));
+            }),
+            TaskScheduler.Default);
     }
 
     private DispatcherTimer CreateProgressTimer()

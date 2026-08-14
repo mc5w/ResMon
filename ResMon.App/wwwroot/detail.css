@@ -219,10 +219,16 @@ body {
 
 /* ---------- Ansichten ---------- */
 
+/* Umbruch statt Überlauf: neun Reiter brauchen rund 710 px, das Fenster darf
+   aber auf 620 px herunter. Ohne den Umbruch verschwänden die letzten Reiter
+   ersatzlos hinter dem rechten Rand — ein Reiter, den man nicht sieht, ist
+   keiner. In der Vorgabebreite von 1180 px ändert sich dadurch nichts. */
 .tabs {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 4px;
+    row-gap: 0;
     border-bottom: 1px solid var(--border);
 }
 
@@ -2215,6 +2221,83 @@ td.conn-none {
     opacity: 0.8;
     margin-top: 3px;
     font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+/* ---------- Befunde des Speicher-Reiters ---------- */
+
+/* Das Panel nimmt sich höchstens gut ein Drittel der Höhe und scrollt dann in
+   sich: Baum und Kachelkarte darüber sind der Hauptzweck des Reiters und sollen
+   nicht von einer langen Befundliste zusammengedrückt werden. */
+.storage-findings-panel {
+    flex: 0 1 auto;
+    max-height: 38%;
+    overflow-y: auto;
+}
+
+.finding .handle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+}
+
+/* Die Schrittnummer steht nur bei mehrschrittigen Handgriffen davor. Feste
+   Breite, damit die Befehlsfelder darunter auf einer Kante beginnen. */
+.finding .step {
+    flex: none;
+    width: 16px;
+    text-align: center;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+}
+
+.finding .command {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 11.5px;
+    color: var(--disk);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 4px 7px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* Der Vorbehalt steht in der Hinweisfarbe und nicht in der Textfarbe: er ist
+   der Teil, der beim Überfliegen als Erstes wegfällt, und genau der, der
+   gelesen werden muss, bevor jemand den Befehl kopiert. */
+.finding .caveat {
+    color: var(--notice);
+    font-size: 11.5px;
+    line-height: 1.55;
+    margin-top: 5px;
+    max-width: 96ch;
+}
+
+/* ---------- Reiter „Programme" ---------- */
+
+.programs-table-wrap {
+    flex: 1;
+    min-height: 0;
+}
+
+/* „nicht gefunden" ist keine Zahl, sondern das Eingeständnis einer Lücke —
+   es steht deshalb gedämpft und kursiv da und nicht wie ein Messwert. */
+#programs-table td.unknown {
+    color: var(--muted);
+    opacity: 0.75;
+    font-style: italic;
+}
+
+#programs-table td.stale {
+    color: var(--ram);
+}
+
+#programs-table td.fresh {
+    color: var(--gpu);
 }
 
 /* ---------- Startkette ---------- */

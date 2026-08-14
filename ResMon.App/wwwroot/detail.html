@@ -69,6 +69,7 @@
         <button type="button" class="tab" data-view="connections">Verbindungen</button>
         <button type="button" class="tab" data-view="system">System</button>
         <button type="button" class="tab" data-view="storage">Speicher</button>
+        <button type="button" class="tab" data-view="programs">Programme</button>
         <button type="button" class="tab" data-view="startup">System-Start</button>
         <button type="button" class="tab" data-view="logs">Logs</button>
         <button type="button" class="tab" data-view="settings">Einstellungen</button>
@@ -270,6 +271,46 @@
                 </div>
             </section>
         </div>
+
+        <!-- Befunde: was die Zahlen darüber bedeuten. Der Baum sagt, wo der Platz
+             liegt; erst hier steht, wofür ein Ordner steht und was der Handgriff
+             kostet. Ausgeführt wird nichts (DESIGN.md §13.5). -->
+        <section class="panel storage-findings-panel" id="storage-findings-panel" hidden>
+            <h3 class="startup-heading">
+                <span>Befunde — was der Platz bedeutet</span>
+                <label class="startup-toggle" title="Blendet auch die Posten ein, bei denen ausdrücklich nichts zu tun ist — sie stehen dabei, damit ihre Größe niemanden in Versuchung führt."><input id="storage-all-findings" type="checkbox"> Auch Hinweise zeigen</label>
+            </h3>
+            <div class="finding-list" id="storage-findings"></div>
+            <p class="startup-empty" id="storage-findings-empty" hidden>
+                Nichts Auffälliges. Keiner der bekannten Speicherfresser liegt auf dieser
+                Partition über der Schwelle.
+            </p>
+        </section>
+    </div>
+
+    <!-- Ansicht: Programme -->
+    <div id="view-programs" class="view" hidden>
+        <section class="controls">
+            <button id="programs-refresh" type="button" class="toggle"
+                    title="Liest die Uninstall-Schlüssel, den Prefetch-Ordner und UserAssist neu und misst die Installationsordner. Läuft ausschließlich auf Knopfdruck.">Neu erheben</button>
+            <input id="programs-filter" type="search" placeholder="Name oder Herausgeber filtern …" autocomplete="off" spellcheck="false">
+            <label title="Zeigt nur Programme, die größer als ein Gigabyte sind."><input id="programs-large" type="checkbox"> Nur ab 1 GB</label>
+            <label title="Zeigt nur Programme, deren letzter Start bekannt und länger als ein halbes Jahr her ist. Programme ohne bekanntes Datum fallen dabei heraus — über sie ist nichts ausgesagt."><input id="programs-stale" type="checkbox"> Nur lange nicht benutzt</label>
+            <span class="status" id="programs-status">Noch nicht erhoben.</span>
+        </section>
+
+        <div class="table-wrap programs-table-wrap">
+            <table id="programs-table">
+                <thead><tr id="programs-head"></tr></thead>
+                <tbody></tbody>
+            </table>
+            <p class="storage-empty" id="programs-empty">
+                Noch nichts erhoben. „Neu erheben" liest die installierten Programme und
+                misst ihre Ordner — das dauert wenige Sekunden.
+            </p>
+        </div>
+
+        <p id="programs-note" class="storage-note" hidden></p>
     </div>
 
     <!-- Ansicht: System-Start -->

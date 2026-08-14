@@ -487,6 +487,36 @@ public static class WebBridge
     }
 
     /// <summary>
+    /// Nur die Kapazität der Laufwerke, im Takt. Hält die Angabe „frei" in der
+    /// Laufwerksauswahl des Speicher-Reiters aktuell, während man aufräumt.
+    /// </summary>
+    /// <remarks>
+    /// Bewusst nicht Teil der Systemübersicht: die ist teuer und wird einmal
+    /// erhoben. Und bewusst nicht Teil der Messnutzlast: die geht im Sekundentakt
+    /// an Overlay <em>und</em> Detailfenster, während diese Angabe nur einen
+    /// Reiter betrifft und sich langsam ändert.
+    /// </remarks>
+    public static string BuildVolumesPayload(IReadOnlyList<VolumeInfo> volumes)
+    {
+        var payload = new
+        {
+            type = "volumes",
+            volumes = volumes.Select(volume => new
+            {
+                name = volume.Name,
+                label = volume.Label,
+                driveType = volume.Type,
+                totalBytes = volume.TotalBytes,
+                freeBytes = volume.FreeBytes,
+                usedBytes = volume.UsedBytes,
+                usedPercent = Round(volume.UsedPercent),
+            }).ToArray(),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>
     /// Die Startanalyse. Wie die Systemübersicht ein eigener Nachrichtentyp und
     /// kein Anhängsel der Messnutzlast: sie wird auf Anforderung erhoben, ändert
     /// sich zwischen zwei Systemstarts nicht und wäre im Sekundentakt reine Last.
@@ -703,6 +733,59 @@ public static class WebBridge
             cloudBytes = result.CloudBytes,
             seconds = Round(result.Duration.TotalSeconds),
             nodes = result.Prune().Select(ScanNode).ToArray(),
+
+            // Die Deutung reist mit dem Baum: sie entsteht aus demselben Ergebnis
+            // und wäre als eigene Nachricht nur eine zweite Gelegenheit, die
+            // beiden auseinanderlaufen zu lassen.
+            findings = StorageFindings.Collect(result).Select(finding => new
+            {
+                severity = finding.Severity,
+                title = finding.Title,
+                why = finding.Why,
+                bytes = finding.Bytes,
+                path = finding.Path,
+                node = finding.NodeId,
+                evidence = finding.Evidence,
+                commands = finding.Commands,
+                caveat = finding.Caveat,
+            }).ToArray(),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>
+    /// Das Programm-Inventar. Eigene Nachricht und eigener Knopf: die Erhebung
+    /// misst Installationsordner und liest den Nutzungsverlauf, das gehört nicht
+    /// in einen Sekundentakt (DESIGN.md §9).
+    /// </summary>
+    public static string BuildProgramsPayload(ProgramReport report)
+    {
+        var payload = new
+        {
+            type = "programs",
+            collectedAt = report.CollectedAt,
+            rawEntryCount = report.RawEntryCount,
+            programs = report.Programs.Select(entry => new
+            {
+                name = entry.Name,
+                scope = entry.ScopeLabel,
+                version = entry.Version,
+                publisher = entry.Publisher,
+                installedOn = entry.InstalledOn,
+                location = entry.InstallLocation,
+                executable = entry.MainExecutable,
+                bytes = entry.Bytes,
+                sizeFrom = entry.SizeFrom,
+                lastUsed = entry.LastUsed,
+                launchCount = entry.LaunchCount,
+
+                // Als Text statt als Flag-Zahl: die Oberfläche zeigt die Herkunft
+                // unverändert an, damit ein Datum nicht mehr behauptet als es weiß.
+                usageFrom = entry.UsageFrom == UsageSource.None ? null : entry.UsageFrom.ToString(),
+                uninstall = entry.UninstallCommand,
+            }).ToArray(),
+            limitations = report.Limitations,
         };
 
         return JsonSerializer.Serialize(payload, Options);

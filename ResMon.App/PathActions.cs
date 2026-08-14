@@ -58,20 +58,24 @@ internal static class PathActions
         }
     }
 
-    /// <summary>Legt den vollen Pfad in die Zwischenablage.</summary>
-    public static void Copy(Window owner, string path)
+    /// <summary>
+    /// Legt Text in die Zwischenablage — einen vollen Pfad oder den Befehl eines
+    /// Befunds. Kopiert wird nur; ausgeführt wird aus dieser Anwendung heraus
+    /// nichts, aus demselben Grund, aus dem hier nicht gelöscht wird.
+    /// </summary>
+    public static void Copy(Window owner, string text)
     {
-        if (string.IsNullOrEmpty(path))
+        if (string.IsNullOrEmpty(text))
             return;
 
         try
         {
-            Clipboard.SetText(path);
+            Clipboard.SetText(text);
         }
         catch (Exception ex) when (ex is ExternalException or InvalidOperationException)
         {
             // Die Zwischenablage gehört kurzzeitig einem anderen Prozess.
-            Warn(owner, $"Der Pfad ließ sich nicht kopieren: {ex.Message}");
+            Warn(owner, $"Der Text ließ sich nicht kopieren: {ex.Message}");
         }
     }
 

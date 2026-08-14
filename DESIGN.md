@@ -8,7 +8,7 @@ der Windows-Task-Manager.
 |---|---|
 | Status | Entwurf, freigegeben für Implementierung |
 | Zielplattform | Windows 11 (x64) |
-| Runtime | .NET 9 |
+| Runtime | .NET 10 |
 | Referenzhardware | NVIDIA-GPU |
 
 ---
@@ -90,7 +90,7 @@ Elevation laufen soll — das ist bewusst auf später verschoben.
 
 | Baustein | Wahl | Begründung |
 |---|---|---|
-| Runtime | .NET 9 | LibreHardwareMonitorLib ist .NET-nativ |
+| Runtime | .NET 10 | LibreHardwareMonitorLib ist .NET-nativ |
 | Fenster-Host | WPF | Transparenz, Always-on-Top, Klick-Durchlässigkeit und Tray-Icon mit dem geringsten Aufwand |
 | UI-Inhalt | WebView2 (HTML/CSS/JS) | Layout und Theming deutlich angenehmer als XAML; WebView2 unterstützt transparente Hintergründe |
 | Sensoren | LibreHardwareMonitorLib (MPL-2.0) | Temperaturen, Takt, Package Power, Lüfterdrehzahl |
@@ -105,13 +105,13 @@ Pro-Prozess-Aufschlüsselung kommt ohnehin aus PDH.
 
 ```
 ResMon.sln
-├─ ResMon.Core                     net9.0, Klassenbibliothek
+├─ ResMon.Core                     net10.0, Klassenbibliothek
 │  ├─ Native/
 │  │  ├─ PdhQuery.cs               P/Invoke-Wrapper um pdh.dll
 │  │  ├─ CpuCache.cs               L1/L2/L3 aus der Prozessortopologie
 │  │  ├─ StorageDevice.cs          SSD oder Festplatte (Seek Penalty, §8.11)
 │  │  └─ Toolhelp.cs               Prozessbaum via CreateToolhelp32Snapshot
-│  ├─ Diagnostics/DiagnosticLog.cs Sammelstelle für gefangene Fehler (§13.7)
+│  ├─ Diagnostics/DiagnosticLog.cs Sammelstelle für gefangene Fehler (§13.8)
 │  ├─ Sensors/
 │  │  ├─ HardwareSource.cs         LHM: Temperaturen, Takt, Power, Lüfter
 │  │  ├─ CounterSource.cs          PDH: CPU, RAM
@@ -125,7 +125,13 @@ ResMon.sln
 │  │  └─ RingBuffer.cs
 │  ├─ Storage/
 │  │  ├─ FolderTree.cs             DirNode, BigFile, Auszug für die Oberfläche
-│  │  └─ FolderScanner.cs          Ordnerbelegung auf Anforderung (§8.11)
+│  │  ├─ FolderScanner.cs          Ordnerbelegung auf Anforderung (§8.11)
+│  │  └─ StorageFindings.cs        Deutung des Scans: Befund, Beleg, Handgriff (§8.13)
+│  ├─ Inventory/
+│  │  ├─ VolumeSpace.cs            Freier Platz je Laufwerk, billig genug für den Takt (§9)
+│  │  ├─ ProgramModel.cs           Programm, Nutzungsquelle, Bericht (§8.13)
+│  │  ├─ ProgramInventory.cs       Uninstall-Schlüssel, gemessene Größe (§8.13)
+│  │  └─ UsageHistory.cs           Letzter Start aus Prefetch und UserAssist (§8.13)
 │  ├─ Startup/                     Analyse des Systemstarts (§8.12)
 │  │  ├─ StartupModel.cs           Eintrag, Kettenglied, Phase, Befund, Bericht
 │  │  ├─ StartupInventory.cs       Run-Keys, Startordner, Aufgaben, Dienste, Store-Apps
@@ -143,11 +149,11 @@ ResMon.sln
 │  │  └─ ProcessPrivileges.cs      SeDebugPrivilege einschalten
 │  ├─ Config/AppSettings.cs
 │  └─ Collector.cs                 Timer-Schleifen, Event SnapshotReady
-└─ ResMon.App                      net9.0-windows, WinExe
+└─ ResMon.App                      net10.0-windows, WinExe
    ├─ OverlayWindow.xaml(.cs)
    ├─ DetailWindow.xaml(.cs)
    ├─ FolderScanSession.cs         ein Scan-Lauf: Abbruch, Aufgabe, Ergebnis
-   ├─ PathActions.cs               Im Explorer zeigen, Pfad kopieren
+   ├─ PathActions.cs               Im Explorer zeigen, Pfad oder Befehl kopieren
    ├─ TrayIcon.cs
    ├─ AppIcon.cs                   lädt ResMon.ico für den Infobereich
    ├─ ResMon.ico                   Anwendungssymbol, erzeugt (siehe unten)
@@ -689,6 +695,101 @@ meisten Zugriffe. Und der Zeitstempel der ETW-Sitzung ist unzuverlässig: er
 meldete ein Datum ein Jahr vor dem letzten Start. Maßgeblich ist die
 Änderungszeit der Datei, die deshalb daneben steht.
 
+### 8.13 Installierte Programme und ihre Nutzung
+
+Drei Quellen, von denen keine für sich genügt.
+
+**Was installiert ist** steht in den Uninstall-Schlüsseln, aus denen auch „Apps
+und Features" liest: `HKLM\…\Uninstall`, dessen 32-Bit-Sicht unter
+`WOW6432Node` und `HKCU\…\Uninstall`. Aussortiert wird, was kein Programm
+beschreibt — Einträge ohne `DisplayName`, Einträge mit `SystemComponent` (von
+Windows verwaltete Laufzeitpakete) und Einträge mit `ParentKeyName` (Nachträge
+zu einem anderen Programm). Auf der Referenzmaschine bleiben so **108 von 281**
+Einträgen übrig.
+
+**Die Größe wird gemessen, nicht geglaubt.** `EstimatedSize` steht dort nur bei
+60 der 108 Programme und ist auch dann selbstgemeldet — der Installer schreibt
+hin, was er will. Stattdessen wird `InstallLocation` (56 Einträge) im Baum eines
+gelaufenen Scans über `FolderScanResult.FindByPath` nachgeschlagen; das kostet
+die Tiefe des Pfades mal die Geschwisterzahl je Ebene und damit praktisch
+nichts. Liegt kein Scan vor oder der Ordner nicht darin, läuft ein eigener
+`FolderScanner` über den einen Ordner. Gemessen: mit Baum 0,3 s, ohne 0,5 s für
+alle 108 — bei identischen Zahlen. Ohne `InstallLocation` bleibt die Zelle leer;
+eine falsche Zahl wäre schlimmer als keine, weil nach ihr sortiert wird.
+
+**Wann ein Programm zuletzt lief** ist die eigentlich entscheidende Spalte — im
+Ordnerbaum kommt sie nicht vor. Zwei Quellen, die sich gegenseitig auffangen:
+
+| Quelle | Was sie kann | Was ihr fehlt |
+|---|---|---|
+| `C:\Windows\Prefetch\*.pf` | jeder Start auf diesem Rechner; Dateiname trägt die Exe, die Änderungszeit **ist** der letzte Start — der komprimierte Inhalt bleibt ungeöffnet | kennt keinen Benutzer, keinen Zähler; der Ordner ist zugriffsgeschützt und braucht Elevation |
+| `HKCU\…\Explorer\UserAssist` | Startzähler und Zeitstempel je Benutzer; 402 Einträge auf der Referenzmaschine | nur Starts über die Oberfläche, nur dieser Benutzer |
+
+UserAssist legt die Namen ROT13-gedreht ab und den Wert als 72-Byte-Struktur:
+Startzähler bei Versatz 4, FILETIME bei 60. Die Drehung ist keine
+Verschlüsselung, sondern eine Hürde gegen versehentliches Mitlesen.
+
+Der NTFS-Zugriffszeitstempel wäre eine dritte Quelle
+(`fsutil behavior query DisableLastAccess` meldet auf der Referenzmaschine „vom
+System verwaltet, aktiviert"), taugt aber nur als schwaches Indiz: Virenscanner
+und Indexdienst fassen Dateien an, ohne dass jemand sie benutzt hätte.
+
+**Die wichtigste Einschränkung** steht bei den Zahlen: auf der Referenzmaschine
+kennt keine der beiden Quellen bei **80 von 108** Programmen die Hauptanwendung.
+Das heißt „nicht gefunden" und ausdrücklich nicht „nie benutzt" — Spiele etwa
+werden über ihre Plattform gestartet und stehen unter deren Namen. Die Spalte
+schreibt das deshalb aus, statt einen Gedankenstrich zu zeigen, der als „nie
+benutzt" gelesen würde.
+
+### 8.13.1 Deutung des Ordner-Scans
+
+Der Baum aus §8.11 ist eine Landkarte: er sagt, **wo** der Platz liegt. Er kann
+nicht sagen, was ein Ordner bedeutet. Dass `docker_data.vhdx` 38 GiB groß ist,
+steht dort; dass eine solche Datei mitwächst und beim Löschen im Container
+*nicht* wieder schrumpft, steht nirgends.
+
+`StorageFindings` schlägt bekannte Orte über `FindByPath` gezielt nach, statt den
+Baum abzusuchen — ein Ort, den es auf dieser Partition nicht gibt, kostet einen
+fehlgeschlagenen Nachschlag und sonst nichts. Jeder Befund trägt dieselben vier
+Angaben wie ein Startbefund (§8.12), plus eine fünfte:
+
+| Feld | Inhalt |
+|---|---|
+| `Bytes` | was dort liegt — nicht zwingend, was frei würde |
+| `Path`, `NodeId` | der Fundort; die Kennung, damit „Im Explorer" den Pfad im **eigenen** Baum nachschlägt statt einen von der Seite gereichten zu übernehmen |
+| `Evidence` | woher die Zahl stammt |
+| `Commands` | der Handgriff als **Folge** von Befehlen, jeder einzeln kopierbar |
+| `Caveat` | **was er kostet** |
+
+`Commands` ist eine Liste und kein einzelner Befehl, weil die lohnendsten
+Handgriffe mehrschrittig sind — und der erste Schritt allein nichts bringt, ohne
+dass es auffiele. Ein virtueller Datenträger wird durch `docker system prune`
+innen leer und bleibt außen exakt so groß; erst `Optimize-VHD` gibt den Platz an
+Windows zurück. Der Prune läuft dabei erfolgreich durch, weshalb ein Befund mit
+nur diesem einen Befehl den Anschein erweckt, die Sache sei erledigt. Gemessen
+auf der Referenzmaschine: nach dem Prune meldete `docker system df` 321 MB
+belegt und 0 B rückgewinnbar, während die `.vhdx` weiter 39,5 GiB groß war.
+
+Wo der Befehl einen Pfad braucht, setzt die Regel ihn ein statt ihn dem Leser zu
+überlassen — die Pfade sind lang und enthalten Leerzeichen.
+
+Der Vorbehalt ist Pflichtfeld und nicht Ausnahme: ein Befund, der nur den Gewinn
+nennt, ist eine Verkaufsanzeige. Zwei Regeln existieren ausschließlich seiner
+wegen — `Windows\Installer` und `WinSxS` sind groß, stehen in jeder Anleitung im
+Netz als Löschkandidat und sind keiner. Bei WinSxS kommt hinzu, dass **die
+gemessene Zahl nicht stimmt**: der größte Teil sind harte Verknüpfungen auf
+Dateien in System32, die hier ein zweites Mal zählen. Auf der Referenzmaschine
+misst der Scan 300,9 GiB, während Windows 284,6 GiB belegt meldet — die Differenz
+von 16,3 GiB entspricht genau der Größe von WinSxS.
+
+Ein Befund ohne Menge steht vor allen anderen: dass die Partition zu 95 % belegt
+ist, gewinnt kein einziges Byte und entscheidet trotzdem, ob die Zahlen darunter
+der Rede wert sind.
+
+**Ausgeführt wird nichts.** Die Begründung aus §13.5 gilt unverändert: die
+Anwendung läuft erhöht, ein Fehlgriff träfe Systemordner ohne Papierkorb und ohne
+Rückgängig. Der Befund legt den Befehl in die Zwischenablage.
+
 ## 9. Sampling-Takte
 
 | Intervall | Aufgabe |
@@ -696,8 +797,10 @@ meldete ein Datum ein Jahr vor dem letzten Start. Maßgeblich ist die
 | 1000 ms | PDH-Aggregat: CPU, RAM, GPU gesamt → Overlay |
 | 2000 ms | LHM-Update: Temperaturen, Takt, Power, Lüfter, Akku |
 | 2000 ms | Prozessliste, Fensterliste und Verbindungstabelle — **nur wenn das Detailfenster geöffnet ist** |
+| 2000 ms | Freier Platz je Laufwerk — **nur wenn das Detailfenster geöffnet ist**. Ein `GetDiskFreeSpaceEx` je Laufwerk, den Wert führt das Dateisystem mit. Nicht zu verwechseln mit dem Ordner-Scan: der bleibt ohne Takt |
 | 30 s | Dienst-Cache aktualisieren |
-| — | Ordnerbelegung (§8.11): **kein Takt**, ausschließlich auf Knopfdruck |
+| — | Ordnerbelegung (§8.11): **kein Takt**, ausschließlich auf Knopfdruck. Die Befunde (§8.13.1) entstehen aus demselben Ergebnis und reisen mit ihm |
+| — | Programm-Inventar (§8.13): **kein Takt**. Es liest drei Registry-Zweige, den Prefetch-Ordner und UserAssist und misst Installationsordner — das ändert sich nicht im Sekundentakt |
 | — | Startanalyse (§8.12): **kein Takt**. Sie liest Ereignisprotokolle, Registry und Aufgabenplanung und ändert sich zwischen zwei Systemstarts ohnehin nicht |
 
 Der Monitor darf nicht selbst zum Lastverursacher werden. Prozess-Enumeration ist
@@ -807,6 +910,8 @@ durchlässig. Deshalb gilt:
 | `expandFolder` | `scan`, `node` | Kinder eines Knotens nachfordern |
 | `openFolder` | `scan`, `node` | Im Explorer zeigen |
 | `copyFolderPath` | `scan`, `node` | Pfad in die Zwischenablage |
+| `copyText` | `name` | Beliebigen Text in die Zwischenablage — der Befehl eines Befunds (§8.13.1). Kopiert wird nur; **ausgeführt wird nichts** |
+| `requestPrograms` | — | Programm-Inventar erheben (§8.13) |
 | `requestStartup` | — | Startanalyse erheben (§8.12) |
 | `bootTrace` | `key: arm\|cancel\|stop\|forget` | Startaufzeichnung schalten |
 | `analyzeTrace` | `key: windows\|own` | Eine Aufzeichnung auswerten |
@@ -983,6 +1088,14 @@ Partition eng wird, sondern **wo** der Platz liegt. Der Durchlauf (§8.11) start
 ausschließlich auf Knopfdruck; vorgewählt ist das vollste Laufwerk, denn deswegen
 ist man hier.
 
+Die Auswahlliste nennt je Laufwerk den freien Platz und **schreibt ihn im
+Zweisekundentakt fort** (§9). Der Scan bleibt davon unberührt — wer aufräumt,
+soll den freien Platz wachsen sehen, ohne die Partition erneut zu durchlaufen.
+Aufgefrischt wird nur der Text der vorhandenen Zeilen; die Liste ganz neu zu
+setzen risse eine geöffnete Auswahl zu, und das alle zwei Sekunden. Erst wenn ein
+Laufwerk hinzukommt oder verschwindet, entsteht sie neu — die getroffene Auswahl
+überlebt auch das.
+
 Nebeneinander stehen **Baum und Kachelkarte** — der Baum trägt die Arbeit, die
 Karte den Blick. Beide zeigen dieselben Knoten, die Auswahl ist gekoppelt: ein
 Klick in die Karte markiert die Zeile und klappt ihre Vorfahren auf, ein
@@ -1024,7 +1137,51 @@ Explorer kann beides besser.
 Bei schmalem **und** flachem Fenster weicht die Karte: untereinander blieben ihr
 rund 70 Pixel, darin ist keine Fläche mehr mit einer anderen zu vergleichen.
 
-### 13.6 System-Start
+**Unter Baum und Karte stehen die Befunde** (§8.13.1) — dieselbe Kartenform wie
+im Reiter System-Start: Schwere, Menge, was es ist, der Handgriff als
+kopierbarer Befehl und darunter in der Hinweisfarbe, was er kostet. Sie beziehen
+sich auf denselben Lauf und reisen mit dessen Antwort; ein eigener Knopf wäre
+eine zweite Gelegenheit, beide auseinanderlaufen zu lassen.
+
+Das Panel nimmt sich höchstens 38 % der Höhe und scrollt dann in sich. Baum und
+Karte sind der Hauptzweck des Reiters und sollen von einer langen Befundliste
+nicht zusammengedrückt werden. Der Schalter „Auch Hinweise zeigen" blendet die
+Posten ein, bei denen ausdrücklich nichts zu tun ist.
+
+Der Absatz oben zum Nichtlöschen bleibt unberührt: die Befunde nennen den
+Handgriff, ausgelöst wird er außerhalb.
+
+### 13.6 Programme
+
+Beantwortet die Frage, die der Speicher-Reiter offen lässt: nicht wo der Platz
+liegt, sondern **was man loswerden kann**. Der Ordnerbaum kennt Ordner; hier
+stehen Programme — mit dem, was der Baum strukturell nicht enthält: ihrer
+Identität aus der Registry und ihrem letzten Start (§8.13).
+
+Vorgabe ist die Sortierung nach **Größe**, und die entscheidende zweite Spalte
+ist **zuletzt benutzt**. „Groß" allein ist kein Grund, etwas zu deinstallieren;
+„groß **und** seit anderthalb Jahren nicht gestartet" ist einer. Beide Spalten
+sind sortierbar, dazu drei Filter: Textsuche über Name und Herausgeber, „nur ab
+1 GB" und „nur lange nicht benutzt" (ab 180 Tagen).
+
+Der Filter „lange nicht benutzt" lässt Programme **ohne** bekanntes Datum
+ausdrücklich heraus. Über sie ist nichts ausgesagt, und eine Liste, die „lange
+nicht benutzt" heißt, darf keine Programme enthalten, über die man nur nichts
+weiß.
+
+Dieselbe Vorsicht in der Darstellung: fehlt das Datum, steht dort **„nicht
+gefunden"** in gedämpfter Kursive und kein Gedankenstrich — bei vier von fünf
+Programmen ist das der Fall, und ein Strich würde als „nie benutzt" gelesen. Das
+ist der Fehlschluss, der Programme kostet. Fehlt die Größe, steht „nicht
+messbar" statt einer Null. Unter der Tabelle stehen die Einschränkungen aus
+§8.13 im Wortlaut.
+
+Deinstalliert wird **nicht** aus der Anwendung heraus, obwohl der
+`UninstallString` bei allen 108 Programmen vorliegt. Aus demselben Grund wie in
+§13.5: die Anwendung läuft erhöht, und ein Deinstallierer, der aus einem
+Fehlklick heraus startet, ist so wenig rückgängig zu machen wie ein Löschvorgang.
+
+### 13.7 System-Start
 
 Beantwortet die Frage, mit der man vor einem Rechner sitzt, der ewig zum Starten
 braucht: **woran liegt es**. Nicht „welche Programme starten mit" — das zeigt der
@@ -1066,7 +1223,7 @@ Der Aufbau folgt der Reihenfolge, in der man fragt:
 Zwischenablage. Das ist der Grund, warum dieser Reiter auch auf einem fremden
 Rechner nützt: wer ein Startproblem untersucht, sitzt selten davor.
 
-### 13.7 Logs
+### 13.8 Logs
 
 Beantwortet eine einzige Frage: was wird gerade **nicht** gelesen, und warum.
 Jeder Eintrag nennt Einstufung (fällt aus / eingeschränkt / Hinweis), Folge und

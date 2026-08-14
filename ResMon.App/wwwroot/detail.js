@@ -3187,6 +3187,13 @@ for (const tab of document.querySelectorAll('.tab')) {
             renderStorageTable();
             renderCrumbs();
             drawTreemap();
+        } else if (state.view === 'programs') {
+            // Die Inventur misst Installationsordner und liest den
+            // Nutzungsverlauf; sie läuft erst, wenn jemand den Reiter aufschlägt
+            // — und danach nur noch auf Knopfdruck.
+            if (!programsState.requested) {
+                requestPrograms();
+            }
         } else if (state.view === 'startup') {
             // Die Analyse liest mehrere Ereignisprotokolle und braucht Sekunden;
             // sie läuft deshalb erst, wenn jemand den Reiter auch aufschlägt —
@@ -3309,6 +3316,11 @@ const storage = {
     rects: [],
     hover: null,
     sort: { key: 'size', asc: false },
+
+    // Die Deutung des Laufs. Reist mit der Scan-Antwort mit, weil sie aus
+    // demselben Ergebnis entsteht.
+    findings: [],
+    allFindings: false,
 };
 
 const MAX_STORAGE_ROWS = 800;
@@ -4093,6 +4105,7 @@ function renderScan(data) {
     storage.root = data.nodes?.length ? data.nodes[0].i : 0;
     storage.mapRoot = storage.root;
     storage.expanded.add(storage.root);
+    storage.findings = data.findings || [];
 
     elements.storageStatus.textContent = storageSummaryText();
     renderStorageNote();
@@ -4100,6 +4113,47 @@ function renderScan(data) {
     renderStorageTable();
     renderCrumbs();
     drawTreemap();
+    renderStorageFindings();
+}
+
+/**
+ * Die Beschriftung einer Zeile in der Laufwerksauswahl. Eigene Funktion, weil
+ * sie an zwei Stellen entsteht — beim Aufbau aus der Systemübersicht und bei
+ * jeder Auffrischung im Takt. Zwei Fassungen liefen unweigerlich auseinander.
+ */
+function driveOptionLabel(volume) {
+    const free = `${formatBytes(volume.freeBytes)} frei`;
+    return volume.label
+        ? `${volume.name}  ${volume.label}  —  ${free}`
+        : `${volume.name}  —  ${free}`;
+}
+
+/**
+ * Schreibt den freien Platz in den vorhandenen Zeilen fort. Bewusst nur den
+ * Text: die Liste neu aufzubauen risse eine geöffnete Auswahl zu, und das alle
+ * zwei Sekunden. Nur wenn ein Laufwerk hinzukommt oder verschwindet — ein
+ * angesteckter Stick etwa —, wird sie ganz neu gesetzt.
+ */
+function updateDriveSpace(volumes) {
+    const list = volumes || [];
+    const options = [...elements.storageDrive.options];
+
+    const sameSet = options.length === list.length
+        && list.every(volume => options.some(option => option.value === volume.name));
+
+    if (!sameSet) {
+        // Die Nachricht führt die Laufwerke flach, die Systemübersicht nach
+        // Datenträger gruppiert — für den Neuaufbau in deren Form bringen.
+        fillStorageDrives([{ volumes: list }]);
+        return;
+    }
+
+    for (const volume of list) {
+        const option = options.find(candidate => candidate.value === volume.name);
+        if (option) {
+            option.textContent = driveOptionLabel(volume);
+        }
+    }
 }
 
 /**
@@ -4120,9 +4174,7 @@ function fillStorageDrives(drives) {
     elements.storageDrive.replaceChildren(...volumes.map(volume => {
         const option = document.createElement('option');
         option.value = volume.name;
-        option.textContent = volume.label
-            ? `${volume.name}  ${volume.label}  —  ${formatBytes(volume.freeBytes)} frei`
-            : `${volume.name}  —  ${formatBytes(volume.freeBytes)} frei`;
+        option.textContent = driveOptionLabel(volume);
         return option;
     }));
 
@@ -4311,6 +4363,26 @@ if (host) {
 
         if (data.type === 'settings') {
             applySettings(data);
+            return;
+        }
+
+        // Nur die Kapazität, im Zweisekundentakt. Hält die Angabe „frei" in der
+        // Laufwerksauswahl aktuell, während man aufräumt — der Scan selbst
+        // bleibt ohne Takt.
+        if (data.type === 'volumes') {
+            updateDriveSpace(data.volumes);
+            return;
+        }
+
+        // Das Programm-Inventar. Wie der Ordner-Scan und die Startanalyse eine
+        // eigene Nachricht: sie entsteht auf Anforderung und nicht im Takt.
+        if (data.type === 'programs') {
+            programsState.report = data;
+            programs.refresh.disabled = false;
+            renderPrograms();
+            renderProgramsNote();
+            programs.status.textContent =
+                `${nf0.format(data.programs?.length || 0)} Programme  ·  erhoben ${dateText(data.collectedAt)}`;
             return;
         }
 
@@ -5447,3 +5519,399 @@ startup.allFindings.addEventListener('change', event => {
 renderColumnHead(startup.entriesHead, 'startup', STARTUP_COLUMNS, applyStartupWidths);
 renderColumnHead(startup.handlesHead, 'handles', HANDLE_COLUMNS, applyHandleWidths);
 renderColumnHead(startup.traceHead, 'trace', TRACE_COLUMNS, applyTraceWidths);
+
+// ---------- Befunde des Speicher-Reiters ----------
+
+/* Der Baum sagt, wo der Platz liegt. Diese Liste sagt, was ein Ordner bedeutet
+   und was der Handgriff kostet — dieselbe Form wie die Startbefunde: Befund,
+   Beleg, Handgriff. Ausgeführt wird nichts; der Befehl geht in die
+   Zwischenablage (DESIGN.md §13.5). */
+
+const storageFindings = {
+    panel: document.getElementById('storage-findings-panel'),
+    list: document.getElementById('storage-findings'),
+    empty: document.getElementById('storage-findings-empty'),
+    all: document.getElementById('storage-all-findings'),
+};
+
+function renderStorageFindings() {
+    const all = storage.findings || [];
+    const rows = storage.allFindings ? all : all.filter(finding => finding.severity !== 'hint');
+
+    storageFindings.panel.hidden = !storage.summary;
+    storageFindings.empty.hidden = rows.length > 0;
+
+    storageFindings.list.replaceChildren(...rows.map(buildStorageFinding));
+}
+
+function buildStorageFinding(finding) {
+    const item = document.createElement('div');
+    item.className = 'finding';
+
+    const severity = document.createElement('span');
+    severity.className = `sev ${finding.severity}`;
+    severity.textContent =
+        { high: 'schwer', medium: 'mittel', hint: 'Hinweis' }[finding.severity] || finding.severity;
+
+    const size = document.createElement('span');
+    size.className = `cost ${finding.severity}`;
+    size.textContent = finding.bytes === null || finding.bytes === undefined
+        ? '–'
+        : formatBytes(finding.bytes);
+
+    const body = document.createElement('div');
+
+    const title = document.createElement('p');
+    title.className = 'title';
+    title.textContent = finding.title;
+
+    const why = document.createElement('p');
+    why.className = 'why';
+    why.textContent = finding.why;
+
+    body.append(title, why);
+
+    const handles = buildFindingHandles(finding);
+    if (handles) {
+        body.append(handles);
+    }
+
+    /* Der Vorbehalt steht unter dem Befehl und nicht darüber: erst was es
+       bringt, dann was es kostet — aber beides, bevor jemand kopiert. */
+    if (finding.caveat) {
+        const caveat = document.createElement('p');
+        caveat.className = 'caveat';
+        caveat.textContent = finding.caveat;
+        body.append(caveat);
+    }
+
+    if (finding.evidence) {
+        const evidence = document.createElement('p');
+        evidence.className = 'evidence';
+        evidence.textContent = finding.path
+            ? `${finding.evidence}  ·  ${finding.path}`
+            : finding.evidence;
+        body.append(evidence);
+    }
+
+    item.append(severity, size, body);
+    return item;
+}
+
+/* Die Handgriffe eines Befunds: je Schritt eine Zeile mit eigenem Kopierknopf,
+   darunter der Weg in den Explorer.
+
+   Eine Zeile je Schritt und nicht ein Befehl mit Zeilenumbrüchen: die
+   lohnendsten Handgriffe sind mehrschrittig, und wer den zweiten Schritt
+   auslässt, merkt es nicht — der erste läuft ja erfolgreich durch. Ein
+   virtueller Datenträger etwa wird durch Aufräumen innerhalb der Maschine kein
+   Byte kleiner; das tut erst das Kompaktieren danach.
+
+   Der Pfad wird nicht mitgeschickt, sondern über die Knotenkennung
+   nachgeschlagen — der Host öffnet damit nur, was in seinem eigenen Baum steht. */
+function buildFindingHandles(finding) {
+    const commands = finding.commands || [];
+    const hasNode = finding.node !== null && finding.node !== undefined;
+
+    if (!commands.length && !hasNode) {
+        return null;
+    }
+
+    const box = document.createElement('div');
+
+    commands.forEach((command, index) => {
+        const row = document.createElement('div');
+        row.className = 'handle';
+
+        // Die Nummer nur, wenn es mehrere sind — bei einem einzelnen Befehl wäre
+        // eine „1" davor eine Behauptung, es käme noch etwas.
+        if (commands.length > 1) {
+            const step = document.createElement('span');
+            step.className = 'step';
+            step.textContent = index + 1;
+            row.append(step);
+        }
+
+        const code = document.createElement('code');
+        code.className = 'command';
+        code.textContent = command;
+        code.title = command;
+
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.className = 'toggle';
+        copy.textContent = 'Kopieren';
+        copy.title = 'Legt den Befehl in die Zwischenablage. Ausgeführt wird er hier nicht.';
+        copy.addEventListener('click', () => send('copyText', { name: command }));
+
+        row.append(code, copy);
+        box.append(row);
+    });
+
+    if (hasNode) {
+        const row = document.createElement('div');
+        row.className = 'handle';
+
+        const reveal = document.createElement('button');
+        reveal.type = 'button';
+        reveal.className = 'toggle';
+        reveal.textContent = 'Im Explorer zeigen';
+        reveal.title = 'Zeigt den Fundort im Explorer.';
+        reveal.addEventListener('click', () =>
+            send('openFolder', { scan: storage.scanId, node: finding.node }));
+
+        row.append(reveal);
+        box.append(row);
+    }
+
+    return box;
+}
+
+storageFindings.all.addEventListener('change', event => {
+    storage.allFindings = event.target.checked;
+    renderStorageFindings();
+});
+
+// ---------- Reiter „Programme" ----------
+
+const programs = {
+    refresh: document.getElementById('programs-refresh'),
+    filter: document.getElementById('programs-filter'),
+    onlyLarge: document.getElementById('programs-large'),
+    onlyStale: document.getElementById('programs-stale'),
+    status: document.getElementById('programs-status'),
+    head: document.getElementById('programs-head'),
+    body: document.querySelector('#programs-table tbody'),
+    empty: document.getElementById('programs-empty'),
+    note: document.getElementById('programs-note'),
+};
+
+const programsState = {
+    report: null,
+    requested: false,
+    filter: '',
+    onlyLarge: false,
+    onlyStale: false,
+    sort: { key: 'bytes', asc: false },
+};
+
+/* Ab hier gilt ein Programm als lange nicht benutzt. Ein halbes Jahr ist die
+   Grenze, ab der „ich brauche das noch gelegentlich" unwahrscheinlich wird. */
+const STALE_DAYS = 180;
+
+const GIGABYTE = 1073741824;
+
+const PROGRAM_COLUMNS = [
+    { key: 'name', label: 'Programm', align: 'left', width: 300, help: 'Der Anzeigename, unter dem das Programm auch in „Apps und Features" steht.' },
+    { key: 'bytes', label: 'Größe', align: 'right', width: 96, help: 'Der gemessene Installationsordner — nicht der Registry-Wert EstimatedSize, der selbstgemeldet ist und bei rund der Hälfte fehlt. Leer heißt: kein Installationsort hinterlegt, also nicht messbar.' },
+    { key: 'lastUsed', label: 'Zuletzt benutzt', align: 'right', width: 132, help: 'Aus Prefetch und UserAssist. „Nicht gefunden" heißt, dass keine der beiden Quellen die Hauptanwendung kennt — ausdrücklich nicht, dass das Programm nie lief.' },
+    { key: 'launchCount', label: 'Starts', align: 'right', width: 72, help: 'Wie oft der Explorer den Start gezählt hat. Nur aus UserAssist und nur für diesen Benutzer.' },
+    { key: 'installedOn', label: 'Installiert', align: 'right', width: 100, help: 'Aus dem Wert InstallDate, der nur das Datum ohne Uhrzeit trägt und bei rund der Hälfte der Einträge fehlt.' },
+    { key: 'publisher', label: 'Herausgeber', align: 'left', width: 180, help: 'Der Herausgeber laut Registry.' },
+    { key: 'scope', label: 'Gilt für', align: 'left', width: 130, help: 'Ob das Programm für alle Benutzer installiert ist oder nur für diesen.' },
+];
+
+function applyProgramWidths() {
+    applyColumnWidths(document.getElementById('programs-table'), 'programs', PROGRAM_COLUMNS);
+}
+
+function requestPrograms() {
+    programsState.requested = true;
+    programs.refresh.disabled = true;
+    programs.status.textContent = 'Wird erhoben …';
+    send('requestPrograms');
+}
+
+function daysSince(value) {
+    if (!value) {
+        return null;
+    }
+    const then = new Date(value).getTime();
+    return Number.isNaN(then) ? null : Math.floor((Date.now() - then) / 86400000);
+}
+
+/* „Nicht gefunden" statt eines Gedankenstrichs: bei vier von fünf Programmen
+   steht das hier, und ein Strich würde als „nie benutzt" gelesen — genau der
+   Fehlschluss, der Programme kostet. */
+function lastUsedText(entry) {
+    const days = daysSince(entry.lastUsed);
+    if (days === null) {
+        return { text: 'nicht gefunden', className: 'unknown' };
+    }
+    if (days <= 0) {
+        return { text: 'heute', className: 'fresh' };
+    }
+    if (days === 1) {
+        return { text: 'gestern', className: 'fresh' };
+    }
+    if (days < 30) {
+        return { text: `vor ${days} Tagen`, className: 'fresh' };
+    }
+    return {
+        text: new Date(entry.lastUsed).toLocaleDateString('de-DE', { dateStyle: 'short' }),
+        className: days >= STALE_DAYS ? 'stale' : '',
+    };
+}
+
+function visiblePrograms() {
+    const rows = programsState.report?.programs || [];
+    const needle = programsState.filter.toLowerCase();
+
+    const filtered = rows.filter(entry => {
+        if (needle && !`${entry.name} ${entry.publisher || ''}`.toLowerCase().includes(needle)) {
+            return false;
+        }
+        if (programsState.onlyLarge && (entry.bytes || 0) < GIGABYTE) {
+            return false;
+        }
+        if (programsState.onlyStale) {
+            const days = daysSince(entry.lastUsed);
+            // Ohne bekanntes Datum ist über das Programm nichts ausgesagt — es
+            // gehört deshalb nicht in eine Liste namens „lange nicht benutzt".
+            if (days === null || days < STALE_DAYS) {
+                return false;
+            }
+        }
+        return true;
+    });
+
+    const { key, asc } = programsState.sort;
+    const direction = asc ? 1 : -1;
+
+    return filtered.sort((left, right) => {
+        const a = programValue(left, key);
+        const b = programValue(right, key);
+
+        // Unbekanntes ans Ende, gleich in welche Richtung sortiert wird: eine
+        // fehlende Messung ist kein kleiner Wert.
+        if (a === null && b === null) {
+            return 0;
+        }
+        if (a === null) {
+            return 1;
+        }
+        if (b === null) {
+            return -1;
+        }
+
+        return typeof a === 'string' ? a.localeCompare(b, 'de') * direction : (a - b) * direction;
+    });
+}
+
+function programValue(entry, key) {
+    if (key === 'name' || key === 'publisher' || key === 'scope') {
+        return entry[key] || null;
+    }
+    if (key === 'lastUsed' || key === 'installedOn') {
+        if (!entry[key]) {
+            return null;
+        }
+        const value = new Date(entry[key]).getTime();
+        return Number.isNaN(value) ? null : value;
+    }
+    return entry[key] === null || entry[key] === undefined ? null : entry[key];
+}
+
+function renderPrograms() {
+    const rows = visiblePrograms();
+    programs.empty.hidden = rows.length > 0 || !programsState.report;
+
+    programs.body.replaceChildren(...rows.map(entry => {
+        const tr = document.createElement('tr');
+        const last = lastUsedText(entry);
+
+        for (const column of PROGRAM_COLUMNS) {
+            const td = document.createElement('td');
+
+            if (column.key === 'name') {
+                td.textContent = entry.name;
+                td.title = [entry.location, entry.executable, entry.version]
+                    .filter(Boolean).join('\n') || entry.name;
+            } else if (column.key === 'bytes') {
+                td.className = 'num';
+                if (entry.bytes === null || entry.bytes === undefined) {
+                    td.classList.add('unknown');
+                    td.textContent = 'nicht messbar';
+                    td.title = 'Für dieses Programm steht kein Installationsort in der Registry.';
+                } else {
+                    td.textContent = formatBytes(entry.bytes);
+                }
+            } else if (column.key === 'lastUsed') {
+                td.className = `num ${last.className}`.trim();
+                td.textContent = last.text;
+                td.title = entry.usageFrom
+                    ? `Quelle: ${entry.usageFrom}`
+                    : 'Weder Prefetch noch UserAssist kennen die Hauptanwendung dieses Programms.';
+            } else if (column.key === 'launchCount') {
+                td.className = 'num';
+                td.textContent = entry.launchCount === null || entry.launchCount === undefined
+                    ? '–'
+                    : nf0.format(entry.launchCount);
+            } else if (column.key === 'installedOn') {
+                td.className = 'num';
+                td.textContent = entry.installedOn
+                    ? new Date(entry.installedOn).toLocaleDateString('de-DE', { dateStyle: 'short' })
+                    : '–';
+            } else {
+                td.textContent = entry[column.key] || '–';
+            }
+
+            tr.append(td);
+        }
+
+        return tr;
+    }));
+
+    const total = programsState.report?.programs?.length || 0;
+    programs.status.textContent = programsState.report
+        ? `${nf0.format(rows.length)} von ${nf0.format(total)} Programmen`
+        : 'Noch nicht erhoben.';
+}
+
+function renderProgramsNote() {
+    const limitations = programsState.report?.limitations || [];
+    programs.note.textContent = limitations.join(' ');
+    programs.note.hidden = limitations.length === 0;
+}
+
+/* Sortieren per Klick auf die Kopfzeile. Der Ziehgriff für die Breite liegt als
+   Kind im th — ein Klick darauf darf nicht mitsortieren. */
+function wireProgramSorting() {
+    [...programs.head.children].forEach((th, index) => {
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', event => {
+            if (event.target !== th) {
+                return;
+            }
+
+            const key = PROGRAM_COLUMNS[index].key;
+            const textual = key === 'name' || key === 'publisher' || key === 'scope';
+
+            programsState.sort = programsState.sort.key === key
+                ? { key, asc: !programsState.sort.asc }
+                : { key, asc: textual };
+
+            renderPrograms();
+        });
+    });
+}
+
+programs.refresh.addEventListener('click', requestPrograms);
+
+programs.filter.addEventListener('input', event => {
+    programsState.filter = event.target.value.trim();
+    renderPrograms();
+});
+
+programs.onlyLarge.addEventListener('change', event => {
+    programsState.onlyLarge = event.target.checked;
+    renderPrograms();
+});
+
+programs.onlyStale.addEventListener('change', event => {
+    programsState.onlyStale = event.target.checked;
+    renderPrograms();
+});
+
+renderColumnHead(programs.head, 'programs', PROGRAM_COLUMNS, applyProgramWidths);
+wireProgramSorting();

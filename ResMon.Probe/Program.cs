@@ -39,6 +39,7 @@ internal static class Program
             "startup" => DumpStartup(),
             "boottrace" => DumpBootTrace(args.Length > 1 ? args[1] : null),
             "scan" => DumpScan(args.Length > 1 ? args[1] : @"C:\"),
+            "programs" => DumpPrograms(args.Length > 1 ? args[1] : null),
             _ => Help(),
         };
     }
@@ -59,9 +60,11 @@ internal static class Program
               startup            Systemstart: Phasen, Startkette, Autostart-Einträge, Befunde
               boottrace [datei]  ETW-Startaufzeichnung auswerten (Vorgabe: die von Windows selbst)
               paths              Prüfen, welche PDH-Zählerpfade dieses System kennt
-              scan [Laufwerk]    Ordnerbelegung einer Partition messen (Vorgabe C:\)
+              scan [Laufwerk]    Ordnerbelegung einer Partition messen (Vorgabe C:\), mit Befunden
+              programs [Lw]      Installierte Programme: gemessene Größe und letzte Nutzung
 
-            Temperaturen und der Netzverkehr pro Prozess brauchen Administratorrechte.
+            Temperaturen, der Netzverkehr pro Prozess und die letzte Nutzung aus Prefetch
+            brauchen Administratorrechte.
             """);
         return 1;
     }
@@ -720,6 +723,101 @@ internal static class Program
             Console.WriteLine(
                 $"    {Gib(slice.TotalBytes),8} GiB  {percent,5:N1} %  {mark} {Truncate(result.PathOf(slice.Id), 90)}");
         }
+
+        DumpFindings(result);
+        return 0;
+    }
+
+    /// <summary>
+    /// Die Deutung des Scans. Hier steht, ob eine Regel überhaupt greift — ein
+    /// Befund, der auf der Referenzmaschine ausbleibt, ist der Beleg dafür, dass
+    /// der Pfad-Nachschlag ins Leere läuft.
+    /// </summary>
+    private static void DumpFindings(FolderScanResult result)
+    {
+        IReadOnlyList<StorageFinding> findings = StorageFindings.Collect(result);
+
+        Console.WriteLine();
+        Console.WriteLine($"Befunde: {findings.Count}");
+        Console.WriteLine();
+
+        foreach (StorageFinding finding in findings)
+        {
+            string amount = finding.Bytes is { } bytes ? $"{Gib(bytes),8} GiB" : $"{"—",12}";
+            Console.WriteLine($"  [{finding.Severity,-6}] {amount}  {finding.Title}");
+
+            if (finding.Path is { } path)
+                Console.WriteLine($"                            Ort:       {Truncate(path, 80)}");
+
+            if (finding.Evidence is { } evidence)
+                Console.WriteLine($"                            Beleg:     {evidence}");
+
+            for (int step = 0; step < finding.Commands.Count; step++)
+            {
+                string label = finding.Commands.Count > 1 ? $"Schritt {step + 1}:" : "Befehl:   ";
+                Console.WriteLine($"                            {label} {finding.Commands[step]}");
+            }
+
+            // Der Vorbehalt ist der Teil, der beim Abschreiben als Erstes
+            // wegfällt — deshalb steht er hier ungekürzt.
+            if (finding.Caveat is { } caveat)
+                Console.WriteLine($"                            Vorbehalt: {caveat}");
+
+            Console.WriteLine();
+        }
+    }
+
+    /// <summary>
+    /// Das Programm-Inventar. Mit Laufwerksangabe läuft vorher ein voller Scan,
+    /// damit die Größen aus dem Baum kommen; ohne sie misst jeder
+    /// Installationsordner sich selbst.
+    /// </summary>
+    private static int DumpPrograms(string? root)
+    {
+        FolderScanResult? scan = null;
+
+        if (root is not null)
+        {
+            if (!root.EndsWith('\\'))
+                root += '\\';
+
+            Console.WriteLine($"Durchlaufe {root} für die Größen …");
+            scan = new FolderScanner().Run(root, CancellationToken.None);
+            Console.WriteLine($"  {scan.DirectoryCount:N0} Ordner in {scan.Duration.TotalSeconds:N1} s");
+            Console.WriteLine();
+        }
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        ProgramReport report = ProgramInventory.Collect(scan, CancellationToken.None);
+        watch.Stop();
+
+        Console.WriteLine(
+            $"Erhoben in {watch.Elapsed.TotalSeconds:N1} s — {report.Programs.Count} Programme " +
+            $"aus {report.RawEntryCount} Registry-Einträgen");
+        Console.WriteLine();
+
+        int measured = report.Programs.Count(entry => entry.Bytes is not null);
+        int used = report.Programs.Count(entry => entry.LastUsed is not null);
+        Console.WriteLine($"Mit gemessener Größe:   {measured,4} von {report.Programs.Count}");
+        Console.WriteLine($"Mit letzter Nutzung:    {used,4} von {report.Programs.Count}");
+        Console.WriteLine();
+
+        Console.WriteLine($"{"Größe",10}  {"Zuletzt",12}  {"Starts",6}  {"Quelle",-10}  Programm");
+        foreach (ProgramEntry entry in report.Programs.Take(40))
+        {
+            string size = entry.Bytes is { } bytes ? $"{Gib(bytes)} GiB" : "—";
+            string last = entry.LastUsed?.ToString("dd.MM.yyyy", CultureInfo.CurrentCulture) ?? "—";
+            string count = entry.LaunchCount?.ToString(CultureInfo.CurrentCulture) ?? "—";
+            string origin = entry.UsageFrom == UsageSource.None ? "—" : entry.UsageFrom.ToString();
+
+            Console.WriteLine(
+                $"{size,10}  {last,12}  {count,6}  {origin,-10}  {Truncate(entry.Name, 44)}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("Was die Zahlen einschränkt:");
+        foreach (string limitation in report.Limitations)
+            Console.WriteLine($"  — {limitation}");
 
         return 0;
     }

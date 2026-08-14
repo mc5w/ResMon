@@ -18,7 +18,7 @@ Umsetzung von [DESIGN.md](DESIGN.md).
 ## Voraussetzungen
 
 - Windows 11 x64
-- .NET 9 SDK (über `global.json` gepinnt)
+- .NET 10 SDK (über `global.json` gepinnt)
 - WebView2-Runtime (auf Windows 11 vorinstalliert)
 - Administratorrechte zur Laufzeit — LibreHardwareMonitorLib lädt einen
   Kernel-Treiber für die Temperatursensoren
@@ -35,7 +35,7 @@ Die Anwendung fordert per Manifest Administratorrechte an; der Start löst also
 eine UAC-Abfrage aus.
 
 ```bash
-ResMon.App\bin\x64\Release\net9.0-windows\ResMon.exe
+ResMon.App\bin\x64\Release\net10.0-windows\ResMon.exe
 ```
 
 Beim Start erscheint das Overlay an der zuletzt gespeicherten Position und ein
@@ -46,7 +46,7 @@ Tray-Icon. Bedienung:
 - **Details** — Prozessfenster öffnen (erst dann laufen Prozess-Enumeration und ETW)
 - **Tray-Menü** — Deckkraft, sichtbare Zeilen, Klick-Durchlässigkeit, Autostart, Beenden
 
-Das Detailfenster hat acht Reiter:
+Das Detailfenster hat neun Reiter:
 
 | Reiter | Inhalt |
 |---|---|
@@ -54,7 +54,8 @@ Das Detailfenster hat acht Reiter:
 | **Energie** | Leistungsaufnahme, Temperaturen, Lüfter, Akku und der Energieeinfluss je Prozess |
 | **Verbindungen** | Übersicht der offenen Ports und darunter die vollständige TCP/UDP-Tabelle |
 | **System** | Betriebssystem, Laufzeit, CPU samt Cache-Ebenen, Grafik, Arbeitsspeicher, Mainboard, Geräte und Datenträger |
-| **Speicher** | Welche Ordner eine Partition füllen — sortierter Baum und Kachelkarte nebeneinander |
+| **Speicher** | Welche Ordner eine Partition füllen — sortierter Baum und Kachelkarte nebeneinander, darunter die Befunde mit Handgriff und Vorbehalt |
+| **Programme** | Was installiert ist, wie groß es wirklich ist und wann es zuletzt lief |
 | **System-Start** | Woran der Systemstart hängt: Phasen, gemessene Startkette, Befunde mit Fundstelle, Autostart-Einträge, Wartekette |
 | **Logs** | Was gerade *nicht* ausgelesen werden kann und warum — Zählersätze, Sensortreiber, gefangene Fehler |
 | **Einstellungen** | Farbschema, Deckkraft und Größe des Overlays, sichtbare Zeilen, Reihen des Diagramms |
@@ -68,6 +69,11 @@ Dateien und 291 000 Ordnern: rund 7 Sekunden warm, rund 31 Sekunden kalt auf ein
 NVMe. Auf einer Festplatte dauert es ein Vielfaches, weshalb der Grad der
 Parallelität dort auf zwei Threads sinkt.
 
+In der Laufwerksauswahl steht je Partition der freie Platz, und der wird alle
+zwei Sekunden fortgeschrieben — beim Aufräumen sieht man ihn also wachsen, ohne
+neu zu durchsuchen. Der Scan selbst bleibt ausdrücklich ohne Takt; aufgefrischt
+wird nur die Kapazität, ein Wert, den das Dateisystem ohnehin mitführt.
+
 Links der Baum, je Ebene nach Größe sortiert, mit Anteilsbalken; rechts eine
 Kachelkarte, deren Flächen den Größen entsprechen. Die Auswahl ist gekoppelt.
 Klick in die Karte markiert die Zeile, Doppelklick zoomt hinein, die Brotkrumen
@@ -78,8 +84,40 @@ erhöht, und ein Fehlgriff träfe auch Systemordner ohne Papierkorb.
 Dateien ab 16 MB bekommen einen eigenen Eintrag; `hiberfil.sys` und `pagefile.sys`
 stehen also mit in der Liste. Alles Kleinere zählt in die Summe seines Ordners.
 
+Unter Baum und Karte stehen die **Befunde**: was der große Posten ist, wofür er
+steht, der Handgriff als kopierbare Befehle — und darunter, was der Handgriff
+kostet. Mehrschrittige Handgriffe stehen als nummerierte Folge da, weil der
+erste Schritt allein oft nichts bringt, ohne dass es auffiele: `docker system
+prune` räumt einen virtuellen Datenträger **innen** auf, und die Datei bleibt
+außen exakt so groß, bis `Optimize-VHD` sie kompaktiert. Zwei Regeln existieren allein des Vorbehalts wegen: `Windows\Installer`
+und `WinSxS` sind groß, stehen in jeder Anleitung im Netz als Löschkandidat und
+sind keiner. Bei WinSxS kommt hinzu, dass die gemessene Zahl gar nicht stimmt —
+der größte Teil sind harte Verknüpfungen auf Dateien in System32, die hier ein
+zweites Mal zählen.
+
+Ausgeführt wird auch hier nichts. Der Befehl geht in die Zwischenablage.
+
 Zu lesen ist das Ergebnis mit den Vorbehalten, die unter der Leiste stehen: siehe
 den nächsten Abschnitt.
+
+### Reiter „Programme"
+
+Was der Speicher-Reiter offen lässt: nicht wo der Platz liegt, sondern was man
+loswerden kann. Die Liste stammt aus denselben Uninstall-Schlüsseln wie „Apps und
+Features", zeigt aber zwei Dinge anders.
+
+**Die Größe wird gemessen, nicht geglaubt.** Der Registry-Wert `EstimatedSize`
+steht nur bei 60 von 108 Programmen und ist auch dort selbstgemeldet. Stattdessen
+wird der Installationsordner im Baum eines gelaufenen Scans nachgeschlagen oder
+eigens durchlaufen. Ohne hinterlegten Ordner bleibt die Zelle leer statt null.
+
+**Dazu kommt, wann das Programm zuletzt lief** — aus dem Prefetch-Ordner und aus
+UserAssist. Erst diese Spalte macht die Liste zu einer Entscheidungsgrundlage:
+„groß" allein ist kein Grund, „groß und seit anderthalb Jahren nicht gestartet"
+schon. Filter für „nur ab 1 GB" und „nur lange nicht benutzt" (ab 180 Tagen).
+
+Deinstalliert wird nicht aus der Anwendung heraus, aus demselben Grund, aus dem
+nicht gelöscht wird.
 
 ### Reiter „System-Start"
 
@@ -143,7 +181,7 @@ WebView unter `%LocalAppData%\ResMon\WebView2`.
 `ResMon.Probe` gibt die Rohdaten aus, ohne Oberfläche:
 
 ```bash
-ResMon.Probe\bin\x64\Release\net9.0\ResMon.Probe.exe sensors
+ResMon.Probe\bin\x64\Release\net10.0\ResMon.Probe.exe sensors
 ```
 
 | Modus | Ausgabe |
@@ -153,7 +191,8 @@ ResMon.Probe\bin\x64\Release\net9.0\ResMon.Probe.exe sensors
 | `gpu [n]` | Rohe GPU-Engine-Instanzen mit PID und Engine-Typ |
 | `processes [n]` | Top-15-Prozesse nach CPU inklusive Dienstauflösung |
 | `paths` | Welche der benötigten PDH-Zählerpfade dieses System kennt |
-| `scan [Laufwerk]` | Ordnerbelegung messen: Dauer, Einträge/s, Zuweisungen, Größe der Nutzlast und die 30 größten Pfade |
+| `scan [Laufwerk]` | Ordnerbelegung messen: Dauer, Einträge/s, Zuweisungen, Größe der Nutzlast, die 30 größten Pfade und die Befunde mit Befehl und Vorbehalt |
+| `programs [Lw]` | Installierte Programme mit gemessener Größe und letzter Nutzung. Mit Laufwerksangabe kommen die Größen aus einem vorher laufenden Scan (**für Prefetch erhöht ausführen**) |
 | `startup` | Startanalyse als Text: Phasen, Startkette mit Dauern, Befunde, Inventar, Einschränkungen |
 | `boottrace [datei]` | ETW-Startaufzeichnung auswerten — ohne Argument die, die Windows bei jedem Hochfahren selbst anlegt (**erhöht ausführen**) |
 
@@ -231,6 +270,34 @@ aktivieren. Es würde fast alle verweigerten Pfade öffnen — der Prozess läuf
 erhöht, das Recht liegt schlafend vor —, ist aber eine prozessweite Änderung am
 Token ohne Thread-Begrenzung. Ein Überwachungswerkzeug, das sich still
 Sicherungsrechte erteilt, ist eine Überraschung.
+
+## Was der Programm-Reiter nicht wissen kann
+
+Die Spalte **zuletzt benutzt** hat vier Lücken, und alle vier führen zu
+demselben Fehlschluss, wenn man sie nicht kennt. Ein fehlendes Datum heißt
+„keine Quelle kennt die Hauptanwendung" und **nicht** „nie benutzt". Auf der
+Referenzmaschine trifft das 80 von 108 Programmen.
+
+1. **Prefetch braucht Administratorrechte.** Ohne sie bleibt `C:\Windows\Prefetch`
+   gesperrt, und es trägt allein UserAssist. Auf der Referenzmaschine sank die
+   Zahl der Programme mit bekanntem Datum dadurch von 28 auf 21.
+2. **UserAssist gilt nur für den angemeldeten Benutzer** und nur für Starts über
+   die Oberfläche. Was ein Dienst oder ein Skript aufruft, steht dort nicht.
+3. **Spiele werden über ihre Plattform gestartet.** Steam ruft die Exe des Spiels
+   auf, aber der Eintrag in der Registry zeigt auf eine Symboldatei — die
+   Zuordnung von Programm zu ausführbarer Datei misslingt dann. Genau deshalb
+   haben die größten Posten der Liste kein Datum.
+4. **Portabel entpackte Programme fehlen ganz.** Sie haben keinen
+   Uninstall-Eintrag und tauchen in der Liste nicht auf, auch wenn sie Platz
+   belegen.
+
+Die Spalte **Größe** hat eine eigene Lücke: 55 von 108 Programmen tragen keinen
+`InstallLocation` in der Registry. Dort steht „nicht messbar" — sie sind nicht
+etwa klein.
+
+Nicht benutzt wird `Win32_Product`. Die WMI-Klasse liefert zwar Größen, löst aber
+bei jeder Abfrage eine Konsistenzprüfung **jedes** installierten MSI-Pakets aus;
+das dauert Minuten und kann Reparaturen anstoßen, die niemand angefordert hat.
 
 ## Abweichung von DESIGN.md §12
 
