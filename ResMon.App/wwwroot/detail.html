@@ -64,15 +64,28 @@
                   stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
 
-        <button type="button" class="tab active" data-view="processes">Prozesse</button>
-        <button type="button" class="tab" data-view="energy">Energie</button>
-        <button type="button" class="tab" data-view="connections">Verbindungen</button>
-        <button type="button" class="tab" data-view="system">System</button>
-        <button type="button" class="tab" data-view="storage">Speicher</button>
-        <button type="button" class="tab" data-view="programs">Programme</button>
-        <button type="button" class="tab" data-view="startup">System-Start</button>
-        <button type="button" class="tab" data-view="logs">Logs</button>
-        <button type="button" class="tab" data-view="settings">Einstellungen</button>
+        <!-- Jeder Reiter sagt im Hover, welche Frage er beantwortet. Die Namen
+             allein tun das nicht: „System" und „Speicher" klingen nach
+             demselben, und dass unter „Programme" das Deinstallieren steckt und
+             nicht die laufenden Anwendungen, ist von außen nicht zu sehen. -->
+        <button type="button" class="tab active" data-view="processes"
+                title="Was läuft gerade und was kostet es? Alle Prozesse mit Prozessor-, Speicher-, Datenträger- und Netzlast, dazu ihre Dienste, Fenstertitel und Besitzer. Gleichnamige Kindprozesse lassen sich zusammenfassen, Spalten wählen und ordnen, einzelne Prozesse beenden und mit einer eigenen Notiz versehen.&#10;&#10;Der richtige Reiter, wenn der Rechner jetzt gerade langsam ist.">Prozesse</button>
+        <button type="button" class="tab" data-view="energy"
+                title="Woran geht der Strom? Gemessene Leistungsaufnahme von Prozessor und Grafikkarte, Temperaturen, Lüfterdrehzahlen und der Akku im Einzelnen — darunter eine Liste, die die gemessenen Watt nach Lastanteil auf die Prozesse verteilt.&#10;&#10;Der richtige Reiter, wenn der Lüfter läuft oder der Akku schneller leer ist als sonst.">Energie</button>
+        <button type="button" class="tab" data-view="connections"
+                title="Wer redet mit wem? Alle offenen TCP- und UDP-Verbindungen mit dem Prozess dahinter, dazu oben die Ports, auf denen dieser Rechner Verbindungen annimmt.&#10;&#10;Der richtige Reiter für die Frage, was da eigentlich ins Netz funkt — und welcher Dienst einen Port belegt, den man selbst braucht.">Verbindungen</button>
+        <button type="button" class="tab" data-view="system"
+                title="Was steckt in diesem Rechner? Prozessor, Mainboard, Arbeitsspeicherriegel, Windows-Version und Betriebsdauer, dazu die angeschlossenen Geräte, die Netzwerkverbindungen und je Datenträger Modell, Zustand und Partitionen.&#10;&#10;Eine Bestandsaufnahme, keine Messung: die Angaben ändern sich nicht im Sekundentakt.">System</button>
+        <button type="button" class="tab" data-view="storage"
+                title="Wo liegt der Platz? Ein Durchlauf über eine Partition, das Ergebnis als Ordnerbaum und als Kachelkarte nebeneinander — dazu Befunde, die sagen, wofür ein großer Ordner steht und was das Aufräumen kostet. In derselben Leiste misst ein Knopf, wie zerstückelt die Partition ist.&#10;&#10;Der richtige Reiter, wenn die Platte voll ist. Der Scan läuft ausschließlich auf Knopfdruck.">Speicher</button>
+        <button type="button" class="tab" data-view="programs"
+                title="Was kann weg? Die installierten Programme mit ihrer gemessenen Größe, ihrem Herausgeber und dem Datum, an dem sie zuletzt gestartet wurden.&#10;&#10;Die Ergänzung zum Speicher-Reiter: der kennt Ordner, dieser kennt Programme — und damit die Frage, ob ein großer Ordner zu etwas gehört, das seit zwei Jahren niemand geöffnet hat.">Programme</button>
+        <button type="button" class="tab" data-view="startup"
+                title="Warum dauert das Hochfahren so lange? Windows misst jeden Start selbst mit; hier steht, wie sich die Zeit auf die Phasen verteilt, welche Dienste und Autostart-Einträge sie gekostet haben und woran einer gewartet hat.&#10;&#10;Ausgewertet wird der letzte Start. Die Startaufzeichnung schaltet die Ablaufverfolgung für kommende Starts ein und liefert dann genauere Zahlen.">System-Start</button>
+        <button type="button" class="tab" data-view="logs"
+                title="Was ist dieser Anwendung selbst aufgefallen? Jede Messquelle, die sich nicht lesen ließ, mit Zeitpunkt, Ursache und dem, was dadurch in der Anzeige fehlt.&#10;&#10;Die Stelle zum Nachsehen, wenn irgendwo ein Strich statt einer Zahl steht.">Logs</button>
+        <button type="button" class="tab" data-view="settings"
+                title="Farbschema, die kleine Ansicht mit ihren Zeilen, Deckkraft und Größe, die Reihen des Verlaufsdiagramms und die Meldungsleiste oben.">Einstellungen</button>
     </nav>
 
     <!-- Ansicht: Prozesse -->
@@ -243,8 +256,24 @@
             <button id="storage-start" type="button" class="toggle">Scan starten</button>
             <button id="storage-cancel" type="button" class="toggle" hidden>Abbrechen</button>
             <label title="Zeigt zusätzlich die Dateien, die groß genug für einen eigenen Eintrag sind (ab 16 MB) — etwa hiberfil.sys oder eine Datenträgerabbildung einer virtuellen Maschine."><input id="storage-files" type="checkbox" checked> Große Dateien zeigen</label>
+            <input id="storage-search" type="search" placeholder="Im Baum suchen …" autocomplete="off" spellcheck="false"
+                   title="Hebt jede Zeile hervor, in deren Namen der Text vorkommt, und klappt die Ordner darüber auf.&#10;&#10;Die Kachelkarte markiert dieselben Treffer mit einem doppelten Rahmen aus Schwarz und Weiß, der zu Anfang kurz blinkt. Eine Füllung wäre falsch: die Fläche einer Kachel ist ihre Größe.&#10;&#10;Gesucht wird in dem, was geladen ist — im Auszug des Scans und in allem, was durch Aufklappen dazugekommen ist.">
             <span class="status" id="storage-status">Noch nicht durchsucht.</span>
         </section>
+
+        <!-- Zustand des Datenträgers. Eigene Leiste, weil beides den Datenträger
+             betrifft und nicht den Ordnerbaum darunter. -->
+        <section class="controls">
+            <span class="controls-label" title="Diese beiden Knöpfe betreffen den Datenträger selbst und nicht den Ordnerbaum darunter. Sie geben keinen Platz frei — sie ordnen, was schon da ist.">Zustand des Datenträgers:</span>
+            <button id="storage-analyze" type="button" class="toggle"
+                    title="Misst, wie zerstückelt die gewählte Partition ist.&#10;&#10;Fragmentierung heißt: eine Datei liegt nicht am Stück, sondern in Bruchstücken über die Partition verteilt. Windows füllt beim Schreiben die Lücken, die gelöschte Dateien hinterlassen haben — passt eine neue Datei in keine Lücke ganz hinein, wird sie aufgeteilt.&#10;&#10;Windows liest für die Messung das Dateisystem durch; das dauert je nach Partition Sekunden bis Minuten. Verändert wird dabei nichts.">Fragmentierung messen</button>
+            <button id="storage-optimize" type="button" class="toggle" disabled
+                    title="Führt aus, was Windows für dieses Medium vorsieht. Erst messen — vorher steht nicht fest, was zu tun wäre.">Optimieren</button>
+            <button id="storage-optimize-cancel" type="button" class="toggle" hidden>Abbrechen</button>
+            <span class="status" id="storage-defrag-status">Noch nicht gemessen.</span>
+        </section>
+
+        <p id="storage-defrag-note" class="storage-note" hidden></p>
 
         <p id="storage-note" class="storage-note" hidden></p>
 
@@ -264,7 +293,12 @@
             </div>
 
             <section class="storage-map">
-                <div id="storage-crumbs" class="storage-crumbs"></div>
+                <!-- Die Erklärung der Karte hängt an der Krümelleiste und nicht
+                     an der Zeichenfläche: dort schwebt bereits der eigene
+                     Kachel-Tooltip mit, und zwei Erklärungen unter demselben
+                     Mauszeiger verdecken einander. -->
+                <div id="storage-crumbs" class="storage-crumbs"
+                     title="Kachelkarte: jede Fläche ist so groß wie der Ordner, für den sie steht — nebeneinander vergleichbar, ohne eine Zahl zu lesen.&#10;&#10;Ein Klick markiert die Zeile im Baum links, ein Doppelklick macht den Ordner zur neuen Wurzel der Karte. Rechtsklick öffnet ihn im Explorer oder kopiert seinen Pfad.&#10;&#10;„übrige" fängt auf, was keine eigene Kachel bekommen hat — kleine Dateien und Ordner unter der Schwelle. Ohne sie wären die Flächen daneben zu groß.&#10;&#10;Diese Leiste zeigt den Weg von der Wurzel des Scans bis hierher; ein Klick auf ein Glied springt zurück."></div>
                 <div class="storage-canvas-wrap">
                     <canvas id="storage-canvas"></canvas>
                     <div id="storage-tip" class="storage-tip" hidden></div>
@@ -277,7 +311,7 @@
              kostet. Ausgeführt wird nichts (DESIGN.md §13.5). -->
         <section class="panel storage-findings-panel" id="storage-findings-panel" hidden>
             <h3 class="startup-heading">
-                <span>Befunde — was der Platz bedeutet</span>
+                <span title="Der Baum darüber ist eine Landkarte: er sagt, wo der Platz liegt. Was ein Ordner bedeutet, kann er nicht sagen — dass eine 38 GB große .vhdx die Festplatte einer virtuellen Maschine ist und beim Aufräumen darin kein Byte schrumpft, steht nirgends im Baum.&#10;&#10;Diese Liste macht genau diesen Schritt. Je Befund: was gefunden wurde, warum dort Platz liegt, warum der Vorschlag hier passt, der Handgriff als Befehl samt Erklärung — und was er kostet.&#10;&#10;Ausgeführt wird von hier aus nichts. Die Befehle gehen in die Zwischenablage oder in ein PowerShell-Fenster, in dem sie fertig getippt stehen und auf Enter warten.">Befunde — was der Platz bedeutet</span>
                 <label class="startup-toggle" title="Blendet auch die Posten ein, bei denen ausdrücklich nichts zu tun ist — sie stehen dabei, damit ihre Größe niemanden in Versuchung führt."><input id="storage-all-findings" type="checkbox"> Auch Hinweise zeigen</label>
             </h3>
             <div class="finding-list" id="storage-findings"></div>
@@ -285,6 +319,34 @@
                 Nichts Auffälliges. Keiner der bekannten Speicherfresser liegt auf dieser
                 Partition über der Schwelle.
             </p>
+        </section>
+
+        <!-- Verwaiste Temp-Reste. Erscheint erst auf Knopfdruck aus einem Befund
+             heraus: die Erhebung misst zwei Ordnerbäume durch und liest die
+             Uninstall-Schlüssel, das gehört nicht in einen Scan-Durchlauf. -->
+        <section class="panel storage-temp-panel" id="storage-temp-panel" hidden>
+            <h3 class="startup-heading">
+                <span title="Ein Temp-Ordner wird nicht von Windows aufgeräumt, sondern von dem Programm, das ihn angelegt hat. Ein deinstalliertes Programm räumt nichts mehr auf — seine Reste bleiben für immer liegen.&#10;&#10;Diese Liste hält jeden Posten gegen die installierten Programme und gegen die laufenden Prozesse. Nur was zu keinem von beiden passt und seit über einer Woche unberührt ist, gilt als verwaist und lässt sich hier auswählen.">Verwaiste Temp-Reste</span>
+                <label class="startup-toggle" title="Zeigt zusätzlich die Posten, die einem installierten Programm, einem laufenden Prozess oder gar keinem lesbaren Namen zuzuordnen waren. Auswählen lassen sie sich nicht — sie stehen dabei, damit die Zuordnung nachprüfbar ist."><input id="storage-temp-all" type="checkbox"> Auch zugeordnete zeigen</label>
+                <span class="startup-hint" id="storage-temp-status">–</span>
+            </h3>
+
+            <div class="orphan-list" id="storage-temp-list"></div>
+
+            <p class="startup-empty" id="storage-temp-empty" hidden>
+                Nichts Verwaistes gefunden. Jeder Posten in den Temp-Ordnern ließ sich einem
+                installierten Programm, einem laufenden Prozess oder einem Zufallsnamen
+                zuordnen.
+            </p>
+
+            <ul class="startup-limits" id="storage-temp-limits" hidden></ul>
+
+            <div class="orphan-actions">
+                <label title="Setzt den Haken bei allen verwaisten Posten. Zugeordnete bleiben außen vor — die lassen sich nicht auswählen."><input id="storage-temp-select-all" type="checkbox"> Alle verwaisten auswählen</label>
+                <span class="status" id="storage-temp-selection">Nichts ausgewählt.</span>
+                <button id="storage-temp-delete" type="button" class="toggle danger" disabled
+                        title="Löscht die ausgewählten Posten endgültig — nicht in den Papierkorb, sonst würde kein Platz frei. Vorher fragt ein Fenster nach und nennt, was verschwindet.">Ausgewählte löschen</button>
+            </div>
         </section>
     </div>
 
@@ -340,7 +402,7 @@
         <!-- Befunde -->
         <section class="panel">
             <h3 class="startup-heading">
-                <span>Befunde — was den Start aufgehalten hat</span>
+                <span title="Was den letzten Start gekostet hat, nach Sekunden geordnet: Dienste, die ihr Zeitlimit ausgereizt haben, Autostart-Einträge, verwaiste Verweise und Wartebeziehungen zwischen beiden.&#10;&#10;Je Befund steht dabei, woher die Zahl stammt — ohne Fundstelle wäre sie eine Behauptung.">Befunde — was den Start aufgehalten hat</span>
                 <label class="startup-toggle" title="Blendet auch die Hinweise ein, die nichts kosten, aber in Ordnung gebracht gehören — verwaiste Einträge etwa."><input id="startup-all-findings" type="checkbox"> Auch Hinweise zeigen</label>
             </h3>
             <div class="finding-list" id="startup-findings"></div>
@@ -436,7 +498,8 @@
     <!-- Ansicht: Logs -->
     <div id="view-logs" class="view" hidden>
         <section class="controls">
-            <span id="log-summary" class="log-summary">–</span>
+            <span id="log-summary" class="log-summary"
+                  title="Jede Messquelle, die diese Anwendung anzapft, mit ihrem Zustand. Fällt eine aus, steht hier warum — und was in der Anzeige dadurch fehlt.&#10;&#10;Diese Liste ist der Grund, warum an anderer Stelle ein Strich steht und keine Null: eine Null wäre eine Messung, ein Strich ist das Eingeständnis, dass es keine gibt.">–</span>
             <label title="Zeigt zusätzlich alle Quellen, die einwandfrei gelesen werden — als Gegenprobe zu dem, was fehlt."><input id="log-all" type="checkbox"> Auch das Funktionierende zeigen</label>
             <span class="status" id="log-status">–</span>
         </section>
@@ -454,6 +517,15 @@
                 <h4>Farbschema</h4>
                 <p class="field-hint">Gilt für beide Fenster, einschließlich Titelleiste und Rahmen.</p>
                 <div class="theme-picker" id="theme-picker"></div>
+            </section>
+
+            <section class="info-card">
+                <h4>Meldungen</h4>
+
+                <label class="check">
+                    <input type="checkbox" id="set-notices">
+                    <span>Meldungen oben anzeigen <em>Die gelbe Leiste über den Reitern. Sie nennt, welche Messwerte auf diesem Rechner <b>nicht</b> zu holen sind und warum — etwa die Prozessortemperatur, die einen Kernel-Treiber braucht. Abgeschaltet fehlt nur die Anzeige: die Werte, auf die sich eine Meldung bezieht, bleiben dieselben, sie stehen dann eben unerklärt leer.</em></span>
+                </label>
             </section>
 
             <section class="info-card">

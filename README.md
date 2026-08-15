@@ -54,11 +54,16 @@ Das Detailfenster hat neun Reiter:
 | **Energie** | Leistungsaufnahme, Temperaturen, Lüfter, Akku und der Energieeinfluss je Prozess |
 | **Verbindungen** | Übersicht der offenen Ports und darunter die vollständige TCP/UDP-Tabelle |
 | **System** | Betriebssystem, Laufzeit, CPU samt Cache-Ebenen, Grafik, Arbeitsspeicher, Mainboard, Geräte und Datenträger |
-| **Speicher** | Welche Ordner eine Partition füllen — sortierter Baum und Kachelkarte nebeneinander, darunter die Befunde mit Handgriff und Vorbehalt |
+| **Speicher** | Welche Ordner eine Partition füllen — sortierter Baum und Kachelkarte nebeneinander, darunter die Befunde mit Begründung, Handgriff und Vorbehalt |
 | **Programme** | Was installiert ist, wie groß es wirklich ist und wann es zuletzt lief |
 | **System-Start** | Woran der Systemstart hängt: Phasen, gemessene Startkette, Befunde mit Fundstelle, Autostart-Einträge, Wartekette |
 | **Logs** | Was gerade *nicht* ausgelesen werden kann und warum — Zählersätze, Sensortreiber, gefangene Fehler |
-| **Einstellungen** | Farbschema, Deckkraft und Größe des Overlays, sichtbare Zeilen, Reihen des Diagramms |
+| **Einstellungen** | Farbschema, Deckkraft und Größe des Overlays, sichtbare Zeilen, Reihen des Diagramms, Hinweisleiste an oder aus |
+
+„Logs" und „Einstellungen" sitzen abgesetzt am rechten Rand: sie sind keine
+Datenblätter wie die Reihe davor, sondern zeigen, was die Anwendung an sich
+selbst bemerkt hat, und stellen sie ein. Jeder Reiter erklärt im Hover, welche
+Frage er beantwortet und wann man ihn braucht.
 
 ### Reiter „Speicher"
 
@@ -85,17 +90,70 @@ Dateien ab 16 MB bekommen einen eigenen Eintrag; `hiberfil.sys` und `pagefile.sy
 stehen also mit in der Liste. Alles Kleinere zählt in die Summe seines Ordners.
 
 Unter Baum und Karte stehen die **Befunde**: was der große Posten ist, wofür er
-steht, der Handgriff als kopierbare Befehle — und darunter, was der Handgriff
-kostet. Mehrschrittige Handgriffe stehen als nummerierte Folge da, weil der
-erste Schritt allein oft nichts bringt, ohne dass es auffiele: `docker system
-prune` räumt einen virtuellen Datenträger **innen** auf, und die Datei bleibt
-außen exakt so groß, bis `Optimize-VHD` sie kompaktiert. Zwei Regeln existieren allein des Vorbehalts wegen: `Windows\Installer`
-und `WinSxS` sind groß, stehen in jeder Anleitung im Netz als Löschkandidat und
-sind keiner. Bei WinSxS kommt hinzu, dass die gemessene Zahl gar nicht stimmt —
-der größte Teil sind harte Verknüpfungen auf Dateien in System32, die hier ein
-zweites Mal zählen.
+steht, **warum der Vorschlag ausgerechnet hier auftaucht**, der Handgriff Schritt
+für Schritt — und darunter, was er kostet. Jeder Schritt trägt seine eigene
+Erklärung: nicht nur `net stop wuauserv`, sondern auch, dass das den Dienst
+anhält, weil er die Dateien sonst offen hält. Mehrschrittige Handgriffe stehen
+als nummerierte Folge da, weil der erste Schritt allein oft nichts bringt, ohne
+dass es auffiele: `docker system prune` räumt einen virtuellen Datenträger
+**innen** auf, und die Datei bleibt außen exakt so groß, bis `Optimize-VHD` sie
+kompaktiert. Zwei Regeln existieren allein des Vorbehalts wegen:
+`Windows\Installer` und `WinSxS` sind groß, stehen in jeder Anleitung im Netz als
+Löschkandidat und sind keiner. Bei WinSxS kommt hinzu, dass die gemessene Zahl
+gar nicht stimmt — der größte Teil sind harte Verknüpfungen auf Dateien in
+System32, die hier ein zweites Mal zählen.
 
-Ausgeführt wird auch hier nichts. Der Befehl geht in die Zwischenablage.
+Ausgeführt wird auch hier nichts. Neben jedem Befehl stehen zwei Knöpfe:
+**Kopieren** legt ihn in die Zwischenablage, **In PowerShell öffnen** startet ein
+Fenster, in dem er bereits fertig getippt in der Eingabezeile steht. Abgeschickt
+wird er nicht — den Tastendruck tut der Benutzer, und er sieht vorher genau, was
+er abschickt.
+
+**Verwaiste Temp-Reste.** Der Befund zum Temp-Ordner zählt die größten Posten
+namentlich auf, statt es bei „gehört zu Programmen, die längst beendet sind" zu
+belassen. Ein Knopf darunter geht noch einen Schritt weiter und hält jeden Posten
+gegen die installierten Programme und die laufenden Prozesse. Der Gedanke
+dahinter: ein Temp-Ordner wird nicht von Windows aufgeräumt, sondern von dem
+Programm, das ihn angelegt hat — ist das deinstalliert, räumt niemand mehr auf.
+Solche Reste liegen für immer da.
+
+Jeder Posten bekommt eine Einstufung mit Begründung im Klartext: *in Benutzung*
+(ein Prozess dieses Namens läuft), *zugeordnet* (passt zu einem installierten
+Programm oder zu Windows), *namenlos* (GUID oder `tmpXXXX.tmp` — sagt nichts),
+*zu frisch* (unter 7 Tagen) oder *verwaist*. Nur die letzten lassen sich
+ankreuzen und löschen; alle anderen stehen gesperrt da, damit die Zuordnung
+nachprüfbar bleibt. Vor dem Löschen fragt ein Fenster nach und nennt Zahl, Menge
+und die größten Posten beim Namen. Gelöscht wird endgültig und nicht in den
+Papierkorb — sonst würde kein Platz frei.
+
+Es ist die einzige Stelle, an der ResMon etwas löscht, und die Ausnahme ist eng
+gezogen: es geht nur, was unmittelbar in `%Temp%` oder `%WinDir%\Temp` liegt,
+Haken für Haken ausgewählt. Auf der Referenzmaschine: 48 Posten mit zusammen
+8,5 GB, davon 10 MB in zwei Posten als verwaist eingestuft. Dass die Ausbeute
+klein ist, ist das Ergebnis und kein Mangel.
+
+**Suche.** Das Feld in der Leiste hebt jede Zeile hervor, in deren Namen der Text
+vorkommt, klappt die Ordner darüber auf und markiert dieselben Treffer in der
+Kachelkarte. Die Statuszeile nennt die Trefferzahl.
+
+In der Karte ist die Marke ein doppelter Rahmen aus Schwarz und Weiß, der zu
+Anfang anderthalb Sekunden blinkt und danach stehen bleibt. Eine einzelne Farbe
+taugt dort nicht: die Karte trägt die ganze Palette in mehreren Helligkeiten
+nebeneinander, und was auf der einen Kachel heraussticht, verschwindet auf der
+nächsten. Ein Rahmen und keine Füllung — die Fläche einer Kachel *ist* ihre
+Größe.
+
+**Zustand des Datenträgers.** „Fragmentierung messen" liest über
+`Win32_Volume.DefragAnalysis()` aus, wie zerstückelt die gewählte Partition ist
+— auf einer 300-GB-Partition rund 8 Sekunden, erhöhte Rechte vorausgesetzt.
+
+Der zweite Knopf stößt an, was Windows für dieses Medium vorsieht, und heißt
+entsprechend: auf einer Festplatte **Defragmentieren**, auf einer SSD **TRIM
+ausführen**. Das ist kein Ersatz, sondern der Punkt — auf einer SSD gibt es keine
+Kopfbewegung, die eine zerstückelte Datei langsamer machte. Ein erzwungenes
+Defragmentieren brächte dort keine Geschwindigkeit und kostete Schreibzyklen;
+ResMon bietet es deshalb nicht an. Vor dem Start fragt ein Dialog nach und nennt,
+was tatsächlich läuft.
 
 Zu lesen ist das Ergebnis mit den Vorbehalten, die unter der Leiste stehen: siehe
 den nächsten Abschnitt.
@@ -167,7 +225,8 @@ Bedienung der Tabellen:
 - **Spalten ▾** blendet Spalten ein und aus
 - **Mauszeiger über einer Spaltenüberschrift** erklärt, was der Wert bedeutet;
   dasselbe gilt für die GPU-Engine-Chips in der GPU-Kachel
-- Meldungen über fehlende Zähler lassen sich per ✕ dauerhaft ausblenden
+- Meldungen über fehlende Zähler lassen sich per ✕ dauerhaft ausblenden — oder
+  die ganze Leiste unter Einstellungen abschalten
 
 Sechs Farbschemata (dunkel, hell, blau, rot, grün, sepia) gelten für beide
 Fenster einschließlich Titelleiste und Rahmen.
@@ -191,14 +250,22 @@ ResMon.Probe\bin\x64\Release\net10.0\ResMon.Probe.exe sensors
 | `gpu [n]` | Rohe GPU-Engine-Instanzen mit PID und Engine-Typ |
 | `processes [n]` | Top-15-Prozesse nach CPU inklusive Dienstauflösung |
 | `paths` | Welche der benötigten PDH-Zählerpfade dieses System kennt |
-| `scan [Laufwerk]` | Ordnerbelegung messen: Dauer, Einträge/s, Zuweisungen, Größe der Nutzlast, die 30 größten Pfade und die Befunde mit Befehl und Vorbehalt |
+| `scan [Laufwerk]` | Ordnerbelegung messen: Dauer, Einträge/s, Zuweisungen, Größe der Nutzlast, die 30 größten Pfade und die Befunde mit Begründung, Befehl und Vorbehalt |
 | `programs [Lw]` | Installierte Programme mit gemessener Größe und letzter Nutzung. Mit Laufwerksangabe kommen die Größen aus einem vorher laufenden Scan (**für Prefetch erhöht ausführen**) |
+| `temp` | Temp-Reste einstufen — verwaist, zugeordnet, in Benutzung, namenlos, zu frisch — jeweils mit Begründung. Zeigt nur an, löscht nichts (**für `C:\Windows\Temp` erhöht ausführen**) |
+| `defrag [Lw]` | Zerstückelung einer Partition, samt **aller** Felder, die WMI liefert (**erhöht ausführen**) |
 | `startup` | Startanalyse als Text: Phasen, Startkette mit Dauern, Befunde, Inventar, Einschränkungen |
 | `boottrace [datei]` | ETW-Startaufzeichnung auswerten — ohne Argument die, die Windows bei jedem Hochfahren selbst anlegt (**erhöht ausführen**) |
 
 `scan` ist zugleich die Messbank für den Reiter „Speicher" — Laufzeit,
 Speicherbedarf und die Wirkung der Schwellwerte lassen sich damit prüfen, ohne die
 Oberfläche zu starten.
+
+`temp` ist der Prüfstand für die Einstufung der Temp-Reste, und der einzige Weg,
+sie ohne die Oberfläche zu beurteilen: entscheidend ist nicht, dass die Erhebung
+durchläuft, sondern *was* am Ende unter „verwaist" steht. Zwei Regeln sind genau
+aus dieser Ausgabe entstanden — ohne sie galten die 8,1 GB Mitschnitte der
+eigenen Startaufzeichnung und `DEL5795.tmp` als verwaist.
 
 Für die Arbeit an der Oberfläche ohne Elevation lässt sich `wwwroot` als
 statische Seite ausliefern, etwa mit
@@ -324,6 +391,15 @@ Für den Reiter „System-Start" sind sechs weitere hinzugekommen —
 `inspectProcess`. Auch hier reist **kein Pfad nach innen**: welche Aufzeichnung
 ausgewertet wird, entscheidet ein Schlüsselwort (`windows` oder `own`), und den
 Dateipfad kennt allein der Host.
+
+Drei weitere kamen mit den Befunden und den Temp-Resten dazu: `openShell`
+schreibt einen Befehl in ein frisch geöffnetes PowerShell-Fenster, ohne ihn
+abzuschicken; `requestTemp` erhebt die Temp-Ordner; `removeTemp` löscht daraus.
+Auch `removeTemp` bekommt **keine Pfade**, sondern Indizes in die zuletzt
+gesendete Erhebung — der Pfad, der tatsächlich entfernt wird, stammt damit
+ausschließlich aus einer Liste, die der Host selbst aufgestellt hat. Vor dem
+Löschen prüft er zusätzlich bei jedem einzelnen Posten, dass dieser unmittelbar
+in einem der beiden Temp-Ordner liegt.
 
 ## Was die Startanalyse nicht messen kann
 

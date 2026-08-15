@@ -80,6 +80,18 @@ public sealed class WebCommand
 
     /// <summary>Index eines Knotens im Ergebnis des benannten Laufs.</summary>
     public int? Node { get; set; }
+
+    /// <summary>
+    /// Die ausgewählten Posten einer Liste, als Indizes in die zuletzt
+    /// gesendete Erhebung.
+    /// </summary>
+    /// <remarks>
+    /// Indizes und keine Pfade. Die Seite bekäme sonst die Möglichkeit, dem Host
+    /// einen beliebigen Pfad zum Löschen zu nennen — und der Host läuft erhöht.
+    /// So kann sie nur auf etwas zeigen, das der Host selbst erhoben hat;
+    /// dieselbe Regel wie bei <see cref="Node"/>.
+    /// </remarks>
+    public int[]? Items { get; set; }
 }
 
 /// <summary>
@@ -517,6 +529,47 @@ public static class WebBridge
     }
 
     /// <summary>
+    /// Das Ergebnis einer Fragmentierungsmessung.
+    /// </summary>
+    /// <remarks>
+    /// <c>fields</c> sagt, ob Windows überhaupt Zahlen geliefert hat — ohne
+    /// erhöhte Rechte verweigert die Methode, und eine Anzeige aus lauter
+    /// Strichen sähe sonst aus wie „alles in Ordnung".
+    /// </remarks>
+    public static string BuildDefragPayload(FragmentationReport report)
+    {
+        var payload = new
+        {
+            type = "defrag",
+            phase = "analysis",
+            root = report.Root,
+            fields = report.Raw.Count > 0,
+            hasSeekPenalty = report.HasSeekPenalty,
+            fragmentationMatters = report.FragmentationMatters,
+            actionLabel = report.ActionLabel,
+            defragRecommended = report.DefragRecommended,
+            filePercent = report.FilePercent,
+            freeSpacePercent = report.FreeSpacePercent,
+            totalPercent = report.TotalPercent,
+            mftPercentInUse = report.MftPercentInUse,
+            totalFiles = report.TotalFiles,
+            fragmentedFiles = report.FragmentedFiles,
+            excessFragments = report.ExcessFragments,
+            averageFragmentsPerFile = Round(report.AverageFragmentsPerFile, 2),
+            seconds = Round(report.Duration.TotalSeconds),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>Zwischenstand oder Abschluss eines Optimierungslaufs.</summary>
+    public static string BuildDefragStatusPayload(string phase, string? message)
+    {
+        var payload = new { type = "defrag", phase, message };
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>
     /// Die Startanalyse. Wie die Systemübersicht ein eigener Nachrichtentyp und
     /// kein Anhängsel der Messnutzlast: sie wird auf Anforderung erhoben, ändert
     /// sich zwischen zwei Systemstarts nicht und wäre im Sekundentakt reine Last.
@@ -746,7 +799,11 @@ public static class WebBridge
                 path = finding.Path,
                 node = finding.NodeId,
                 evidence = finding.Evidence,
-                commands = finding.Commands,
+                reason = finding.Reason,
+                action = finding.Action,
+                commands = finding.Commands
+                    .Select(step => new { text = step.Text, does = step.Does })
+                    .ToArray(),
                 caveat = finding.Caveat,
             }).ToArray(),
         };
@@ -786,6 +843,55 @@ public static class WebBridge
                 uninstall = entry.UninstallCommand,
             }).ToArray(),
             limitations = report.Limitations,
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>
+    /// Die Temp-Erhebung. Der Index jedes Postens ist seine Stellung in dieser
+    /// Liste — die Seite schickt ihn zurück, wenn etwas gelöscht werden soll,
+    /// und nie einen Pfad.
+    /// </summary>
+    public static string BuildTempPayload(TempReport report)
+    {
+        var payload = new
+        {
+            type = "temp",
+            collectedAt = report.CollectedAt,
+            roots = report.Roots,
+            totalBytes = report.TotalBytes,
+            orphanBytes = report.OrphanBytes,
+            knownPrograms = report.KnownPrograms,
+            limitations = report.Limitations,
+            entries = report.Entries.Select((entry, index) => new
+            {
+                index,
+                name = entry.Name,
+                path = entry.Path,
+                owner = entry.Owner,
+                program = entry.Program,
+                evidence = entry.Evidence,
+                bytes = entry.Bytes,
+                files = entry.FileCount,
+                isDirectory = entry.IsDirectory,
+                lastWrite = entry.LastWrite,
+            }).ToArray(),
+        };
+
+        return JsonSerializer.Serialize(payload, Options);
+    }
+
+    /// <summary>Was ein Löschlauf ausgerichtet hat.</summary>
+    public static string BuildTempRemovalPayload(TempRemoval removal)
+    {
+        var payload = new
+        {
+            type = "tempRemoval",
+            removed = removal.Removed,
+            failed = removal.Failed,
+            bytesFreed = removal.BytesFreed,
+            errors = removal.Errors,
         };
 
         return JsonSerializer.Serialize(payload, Options);

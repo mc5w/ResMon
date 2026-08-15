@@ -52,6 +52,20 @@ public partial class DetailWindow : Window
     /// <summary>Läuft gerade eine Programm-Inventur? Aus demselben Grund abgewiesen.</summary>
     private bool _programsBusy;
 
+    /// <summary>Läuft gerade eine Temp-Erhebung oder ein Löschlauf?</summary>
+    private bool _tempBusy;
+
+    /// <summary>
+    /// Die zuletzt gesendete Temp-Erhebung. Sie bleibt hier liegen, weil die
+    /// Seite beim Löschen nur Indizes zurückschickt: der Pfad, der tatsächlich
+    /// entfernt wird, stammt damit ausschließlich aus dieser Liste — aus etwas,
+    /// das der Host selbst erhoben hat.
+    /// </summary>
+    private TempReport? _temp;
+
+    /// <summary>Abbruch für einen laufenden Optimierungslauf.</summary>
+    private CancellationTokenSource? _optimize;
+
     /// <summary>
     /// So viele Zeilen bekommt die Handle-Liste. Auf einem laufenden System haben
     /// mehrere hundert Prozesse Handles; interessant sind die mit den meisten.
@@ -200,8 +214,28 @@ public partial class DetailWindow : Window
             case "requestPrograms":
                 RunProgramInventory();
                 break;
+            case "requestTemp":
+                RunTempInventory();
+                break;
+            case "removeTemp" when command.Items is { Length: > 0 } selection:
+                RunTempRemoval(selection);
+                break;
+            case "analyzeVolume" when command.Path is { } analyzed:
+                RunVolumeAnalysis(analyzed);
+                break;
+            case "optimizeVolume" when command.Path is { } optimized:
+                RunVolumeOptimize(optimized);
+                break;
+            case "cancelOptimize":
+                _optimize?.Cancel();
+                break;
             case "copyText" when command.Name is { } text:
                 PathActions.Copy(this, text);
+                break;
+            case "openShell" when command.Name is { } shellCommand:
+                // Geöffnet und getippt, nicht ausgeführt: den letzten Tastendruck
+                // tut der Benutzer (DESIGN.md §13.5).
+                ShellLauncher.Run(this, shellCommand);
                 break;
             case "bootTrace" when command.Key is { } action:
                 ApplyBootTrace(action);
@@ -258,6 +292,7 @@ public partial class DetailWindow : Window
         _webReady = false;
         _scanProgress?.Stop();
         _volumeTimer?.Stop();
+        _optimize?.Cancel();
 
         FolderScanSession? session = _scan;
         _scan = null;
@@ -322,6 +357,137 @@ public partial class DetailWindow : Window
                     Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildProgramsPayload(task.Result));
                 }),
                 TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Erhebt die Temp-Ordner und hält sie gegen die installierten Programme.
+    /// </summary>
+    /// <remarks>
+    /// Läuft im Hintergrund: die Erhebung misst zwei Ordnerbäume durch und liest
+    /// dazu die Uninstall-Schlüssel — auf einem gewachsenen Rechner sind das
+    /// mehrere Sekunden.
+    /// </remarks>
+    private void RunTempInventory()
+    {
+        if (_tempBusy)
+            return;
+
+        _tempBusy = true;
+
+        _ = Task.Run(() => TempInventory.Collect(token: CancellationToken.None))
+            .ContinueWith(
+                task => Dispatcher.BeginInvoke(() =>
+                {
+                    _tempBusy = false;
+                    if (!_webReady)
+                        return;
+
+                    if (task.IsFaulted)
+                    {
+                        DiagnosticLog.Report("Temp-Erhebung", task.Exception!.GetBaseException(),
+                            "Die Erhebung der Temp-Ordner ist fehlgeschlagen");
+                        return;
+                    }
+
+                    _temp = task.Result;
+                    Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildTempPayload(_temp));
+                }),
+                TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Löscht die ausgewählten Temp-Posten — nach Rückfrage.
+    /// </summary>
+    /// <remarks>
+    /// Die Rückfrage stellt der Host und nicht die Seite, aus demselben Grund wie
+    /// beim Beenden eines Prozesses und beim Optimierungslauf: er kennt die
+    /// Posten, die er selbst erhoben hat, und benennt im Dialog, was tatsächlich
+    /// verschwindet. Ein Dialog, den die Seite formuliert, könnte etwas anderes
+    /// behaupten als das, was gleich passiert.
+    /// <para>
+    /// Die Indizes werden gegen die zuletzt gesendete Erhebung aufgelöst. Ein
+    /// Index, den es dort nicht gibt, fällt heraus — schweigend: die Erhebung
+    /// kann zwischen Anzeige und Klick neu gelaufen sein.
+    /// </para>
+    /// </remarks>
+    private void RunTempRemoval(IReadOnlyList<int> selection)
+    {
+        if (_tempBusy || _temp is not { } report)
+            return;
+
+        TempEntry[] chosen =
+        [
+            .. selection
+                .Where(index => index >= 0 && index < report.Entries.Count)
+                .Select(index => report.Entries[index])
+                .Where(entry => entry.Owner != TempOwner.Running)
+        ];
+
+        if (chosen.Length == 0)
+            return;
+
+        if (!ConfirmRemoval(chosen))
+            return;
+
+        _tempBusy = true;
+
+        _ = Task.Run(() => TempCleanup.Remove(chosen, CancellationToken.None))
+            .ContinueWith(
+                task => Dispatcher.BeginInvoke(() =>
+                {
+                    _tempBusy = false;
+                    if (!_webReady)
+                        return;
+
+                    if (task.IsFaulted)
+                    {
+                        DiagnosticLog.Report("Temp-Aufräumen", task.Exception!.GetBaseException(),
+                            "Der Löschlauf ist fehlgeschlagen");
+                        return;
+                    }
+
+                    Web.CoreWebView2.PostWebMessageAsJson(
+                        WebBridge.BuildTempRemovalPayload(task.Result));
+
+                    // Danach neu erheben: die Liste zeigte sonst weiter Posten,
+                    // die es nicht mehr gibt, mit Löschknopf daneben.
+                    RunTempInventory();
+                }),
+                TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Die Rückfrage vor dem Löschen. Nennt Zahl und Menge und die drei größten
+    /// Posten beim Namen — eine Rückfrage, die nur „12 Elemente?“ fragt, ist
+    /// keine, denn sie lässt sich nicht prüfen.
+    /// </summary>
+    private bool ConfirmRemoval(IReadOnlyList<TempEntry> entries)
+    {
+        long bytes = entries.Sum(entry => entry.Bytes);
+        string size = bytes >= 1073741824
+            ? $"{bytes / 1073741824.0:N1} GB"
+            : $"{bytes / 1048576.0:N0} MB";
+
+        string names = string.Join("\n", entries
+            .OrderByDescending(entry => entry.Bytes)
+            .Take(3)
+            .Select(entry => $"    •  {entry.Name}"));
+
+        if (entries.Count > 3)
+            names += $"\n    …  und {entries.Count - 3} weitere";
+
+        string message =
+            $"{entries.Count} Posten mit zusammen {size} werden gelöscht:\n\n{names}\n\n"
+            + "Endgültig, nicht in den Papierkorb — sonst würde kein Platz frei.\n\n"
+            + "Diese Posten wurden keinem installierten Programm zugeordnet. Die Zuordnung "
+            + "geht über den Namen und kann danebenliegen: gehört einer davon doch zu etwas, "
+            + "das noch benutzt wird, legt das Programm ihn beim nächsten Start neu an — "
+            + "verliert dabei aber, was darin stand.";
+
+        return MessageBox.Show(
+            this, message, "Temp-Reste löschen",
+            MessageBoxButton.OKCancel, MessageBoxImage.Warning,
+            MessageBoxResult.Cancel) == MessageBoxResult.OK;
     }
 
     private void RunStartupAnalysis()
@@ -575,6 +741,124 @@ public partial class DetailWindow : Window
         // durch den Synchronisierungskontext.
         _scanProgress ??= CreateProgressTimer();
         _scanProgress.Start();
+    }
+
+    /// <summary>
+    /// Misst, wie zerstückelt eine Partition ist. Läuft im Hintergrund: Windows
+    /// liest dafür das Dateisystem durch und brauchte auf der Referenzmaschine
+    /// 8,5 Sekunden für eine 300-GB-Partition.
+    /// </summary>
+    private void RunVolumeAnalysis(string requested)
+    {
+        if (ValidateRoot(requested) is not { } root)
+        {
+            PostDefrag("done", $"„{requested}“ ist kein Laufwerk, das sich messen lässt.");
+            return;
+        }
+
+        _ = Task.Run(() => VolumeMaintenance.Analyze(root)).ContinueWith(
+            task => Dispatcher.BeginInvoke(() =>
+            {
+                if (!_webReady)
+                    return;
+
+                if (task.IsFaulted)
+                {
+                    DiagnosticLog.Report("Datenträger-Optimierung", task.Exception!.GetBaseException(),
+                        $"Die Messung von »{root}« ist fehlgeschlagen");
+                    PostDefrag("done", "Die Messung ist fehlgeschlagen. Näheres im Reiter Logs.");
+                    return;
+                }
+
+                Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildDefragPayload(task.Result));
+            }),
+            TaskScheduler.Default);
+    }
+
+    /// <summary>
+    /// Führt aus, was Windows für dieses Medium vorsieht — nach ausdrücklicher
+    /// Rückfrage.
+    /// </summary>
+    /// <remarks>
+    /// Nach dem Muster von <see cref="ProcessTerminator"/>: DESIGN.md §13.5
+    /// schließt das Löschen aus der Anwendung heraus aus, weil ein Fehlgriff
+    /// unumkehrbar wäre. Ein Optimierungslauf ist das nicht — er verschiebt
+    /// Daten, verliert keine, und lässt sich jederzeit abbrechen. Die Rückfrage
+    /// bleibt trotzdem, und sie benennt, was auf <em>diesem</em> Medium
+    /// tatsächlich läuft: auf einer SSD ein Retrim, kein Defragmentieren.
+    /// </remarks>
+    private async void RunVolumeOptimize(string requested)
+    {
+        if (ValidateRoot(requested) is not { } root)
+        {
+            PostDefrag("done", $"„{requested}“ ist kein Laufwerk, das sich optimieren lässt.");
+            return;
+        }
+
+        if (_optimize is not null)
+            return;
+
+        bool? seekPenalty = StorageDevice.HasSeekPenalty(root);
+        string what = seekPenalty switch
+        {
+            true => "Windows defragmentiert die Partition — die Dateien werden dabei " +
+                    "zusammenhängend abgelegt. Das kann bei einer vollen Festplatte Stunden dauern.",
+            false => "Dieser Datenträger ist eine SSD. Windows führt deshalb kein " +
+                     "Defragmentieren aus, sondern ein Retrim: es meldet dem Datenträger, " +
+                     "welche Blöcke frei sind. Das dauert meist Sekunden bis Minuten und " +
+                     "kostet keine nennenswerten Schreibzyklen.",
+            _ => "Windows entscheidet selbst, was dieses Medium braucht.",
+        };
+
+        MessageBoxResult answer = MessageBox.Show(
+            this,
+            $"{root} optimieren?\n\n{what}\n\n" +
+            "Der Rechner bleibt dabei benutzbar. Der Lauf lässt sich jederzeit abbrechen; " +
+            "er hinterlässt kein halbfertiges Dateisystem.",
+            "Datenträger optimieren",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question,
+            MessageBoxResult.No);
+
+        if (answer != MessageBoxResult.Yes)
+            return;
+
+        _optimize = new CancellationTokenSource();
+        PostDefrag("running", $"{root} wird optimiert …");
+
+        try
+        {
+            // Die Fortschrittszeilen von defrag.exe kommen aus einem fremden
+            // Thread und müssen über den Dispatcher.
+            int exitCode = await VolumeMaintenance.OptimizeAsync(
+                root,
+                line => Dispatcher.BeginInvoke(() => PostDefrag("running", line)),
+                _optimize.Token);
+
+            PostDefrag("done", exitCode == 0
+                ? $"{root} ist optimiert."
+                : $"Der Lauf endete mit Rückgabewert {exitCode}.");
+        }
+        catch (OperationCanceledException)
+        {
+            PostDefrag("done", "Abgebrochen. Was bis dahin geschehen ist, bleibt gültig.");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            DiagnosticLog.Report("Datenträger-Optimierung", ex, $"Der Lauf auf »{root}« ist fehlgeschlagen");
+            PostDefrag("done", $"Der Lauf ließ sich nicht starten: {ex.Message}");
+        }
+        finally
+        {
+            _optimize?.Dispose();
+            _optimize = null;
+        }
+    }
+
+    private void PostDefrag(string phase, string? message)
+    {
+        if (_webReady)
+            Web.CoreWebView2.PostWebMessageAsJson(WebBridge.BuildDefragStatusPayload(phase, message));
     }
 
     /// <summary>

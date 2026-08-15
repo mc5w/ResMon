@@ -40,6 +40,8 @@ internal static class Program
             "boottrace" => DumpBootTrace(args.Length > 1 ? args[1] : null),
             "scan" => DumpScan(args.Length > 1 ? args[1] : @"C:\"),
             "programs" => DumpPrograms(args.Length > 1 ? args[1] : null),
+            "temp" => DumpTemp(),
+            "defrag" => DumpFragmentation(args.Length > 1 ? args[1] : @"C:\"),
             _ => Help(),
         };
     }
@@ -62,6 +64,8 @@ internal static class Program
               paths              Prüfen, welche PDH-Zählerpfade dieses System kennt
               scan [Laufwerk]    Ordnerbelegung einer Partition messen (Vorgabe C:\), mit Befunden
               programs [Lw]      Installierte Programme: gemessene Größe und letzte Nutzung
+              temp               Temp-Reste einstufen: verwaist, zugeordnet, laufend, namenlos
+              defrag [Lw]        Zerstückelung einer Partition messen (**erhöht ausführen**)
 
             Temperaturen, der Netzverkehr pro Prozess und die letzte Nutzung aus Prefetch
             brauchen Administratorrechte.
@@ -729,6 +733,67 @@ internal static class Program
     }
 
     /// <summary>
+    /// Die Einstufung der Temp-Reste.
+    /// </summary>
+    /// <remarks>
+    /// Der Prüfstand für die Regeln aus §8.13.2, und der einzige Weg, sie ohne
+    /// die Oberfläche zu beurteilen: entscheidend ist nicht, dass die Erhebung
+    /// durchläuft, sondern <em>was</em> am Ende unter „verwaist“ steht. Jeder
+    /// Fehlalarm dort landete in einer Liste mit Löschknopf.
+    /// <para>
+    /// Gelöscht wird hier nichts. Das Werkzeug zeigt nur an.
+    /// </para>
+    /// </remarks>
+    private static int DumpTemp()
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        TempReport report = TempInventory.Collect();
+        watch.Stop();
+
+        Console.WriteLine($"Ordner:    {string.Join(", ", report.Roots)}");
+        Console.WriteLine($"Posten:    {report.Entries.Count} in {watch.Elapsed.TotalSeconds:N1} s, "
+                          + $"zusammen {Mib(report.TotalBytes)}");
+        Console.WriteLine($"Verwaist:  {Mib(report.OrphanBytes)}");
+        Console.WriteLine($"Abgleich:  {report.KnownPrograms} installierte Programme");
+        Console.WriteLine();
+
+        // Verwaist zuerst: das ist die einzige Gruppe, die zum Löschen angeboten
+        // wird, und die einzige, in der ein Fehler etwas kostet.
+        foreach (TempOwner owner in Enum.GetValues<TempOwner>()
+                     .OrderBy(value => value == TempOwner.Orphan ? 0 : 1))
+        {
+            TempEntry[] group = [.. report.Entries.Where(entry => entry.Owner == owner)
+                .OrderByDescending(entry => entry.Bytes)];
+
+            if (group.Length == 0)
+                continue;
+
+            Console.WriteLine($"── {owner} ── {group.Length} Posten, {Mib(group.Sum(e => e.Bytes))}");
+
+            foreach (TempEntry entry in group.Take(10))
+            {
+                Console.WriteLine($"  {Mib(entry.Bytes),10}  {entry.LastWrite:yyyy-MM-dd}  "
+                                  + $"{Truncate(entry.Name, 46)}");
+                Console.WriteLine($"              {Truncate(entry.Evidence, 100)}");
+            }
+
+            if (group.Length > 10)
+                Console.WriteLine($"  … und {group.Length - 10} weitere");
+
+            Console.WriteLine();
+        }
+
+        foreach (string limitation in report.Limitations)
+            Console.WriteLine($"  ! {limitation}");
+
+        return 0;
+    }
+
+    private static string Mib(long bytes) => bytes >= 1073741824
+        ? $"{bytes / 1073741824.0:N1} GiB"
+        : $"{bytes / 1048576.0:N0} MiB";
+
+    /// <summary>
     /// Die Deutung des Scans. Hier steht, ob eine Regel überhaupt greift — ein
     /// Befund, der auf der Referenzmaschine ausbleibt, ist der Beleg dafür, dass
     /// der Pfad-Nachschlag ins Leere läuft.
@@ -752,10 +817,18 @@ internal static class Program
             if (finding.Evidence is { } evidence)
                 Console.WriteLine($"                            Beleg:     {evidence}");
 
+            // Die Begründung ist der Teil, der sich je Rechner unterscheidet —
+            // an ihr zeigt sich, ob eine Regel die gemessene Lage überhaupt
+            // erfasst hat oder nur ihren Standardsatz aufsagt.
+            if (finding.Reason is { } reason)
+                Console.WriteLine($"                            Warum:     {reason}");
+
             for (int step = 0; step < finding.Commands.Count; step++)
             {
+                FindingCommand command = finding.Commands[step];
                 string label = finding.Commands.Count > 1 ? $"Schritt {step + 1}:" : "Befehl:   ";
-                Console.WriteLine($"                            {label} {finding.Commands[step]}");
+                Console.WriteLine($"                            {label} {command.Text}");
+                Console.WriteLine($"                                       ↳ {command.Does}");
             }
 
             // Der Vorbehalt ist der Teil, der beim Abschreiben als Erstes
@@ -821,6 +894,68 @@ internal static class Program
 
         return 0;
     }
+
+    /// <summary>
+    /// Die Zerstückelung einer Partition. Gibt <b>alle</b> Felder aus, die WMI
+    /// liefert — welche das sind, steht in keiner verlässlichen Quelle, und was
+    /// die Auswertung nicht kennt, soll wenigstens hier sichtbar sein.
+    /// </summary>
+    private static int DumpFragmentation(string root)
+    {
+        if (!root.EndsWith('\\'))
+            root += '\\';
+
+        Console.WriteLine($"Untersuche {root} …");
+        Console.WriteLine();
+
+        FragmentationReport report = VolumeMaintenance.Analyze(root);
+
+        string medium = report.HasSeekPenalty switch
+        {
+            true => "Festplatte (Kopfbewegung)",
+            false => "SSD",
+            null => "unbekannt",
+        };
+
+        Console.WriteLine($"Medium              {medium}");
+        Console.WriteLine($"Dauer               {report.Duration.TotalSeconds,10:N1} s");
+        Console.WriteLine($"Windows rät zum Lauf: {(report.DefragRecommended ? "ja" : "nein")}");
+        Console.WriteLine($"Windows täte hier:    {report.ActionLabel}");
+        Console.WriteLine();
+
+        if (report.Raw.Count == 0)
+        {
+            Console.Error.WriteLine("Keine Felder geliefert — die Methode verlangt Administratorrechte.");
+            return 1;
+        }
+
+        Console.WriteLine($"Dateien zerstückelt {Percent(report.FilePercent)}");
+        Console.WriteLine($"Freier Platz        {Percent(report.FreeSpacePercent)}");
+        Console.WriteLine($"Gesamt              {Percent(report.TotalPercent)}");
+        Console.WriteLine($"MFT belegt          {Percent(report.MftPercentInUse)}");
+        Console.WriteLine();
+
+        // Ohne diesen Satz führen die Prozente auf einer SSD in die Irre.
+        if (!report.FragmentationMatters)
+        {
+            Console.WriteLine(
+                "Hinweis: Auf einer SSD gibt es keine Kopfbewegung. Die Prozente beschreiben die");
+            Console.WriteLine(
+                "Buchführung des Dateisystems, nicht die Geschwindigkeit — Defragmentieren bringt");
+            Console.WriteLine(
+                "hier nichts und kostet Schreibzyklen. Windows führt stattdessen ein Retrim aus.");
+            Console.WriteLine();
+        }
+
+        Console.WriteLine($"Alle {report.Raw.Count} gelieferten Felder:");
+        foreach (KeyValuePair<string, string> field in report.Raw.OrderBy(entry => entry.Key))
+            Console.WriteLine($"    {field.Key,-36} {field.Value}");
+
+        return 0;
+    }
+
+    private static string Percent(int? value)
+        => value is { } v ? $"{v,9} %" : $"{"—",11}";
 
     private static string Gib(long bytes) => (bytes / 1073741824.0).ToString("N1", CultureInfo.CurrentCulture);
 

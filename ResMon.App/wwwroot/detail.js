@@ -10,6 +10,7 @@ const STORAGE_WIDTHS = 'resmon.columnWidths';
 const STORAGE_COLLAPSED = 'resmon.collapsedGroups';
 const STORAGE_NOTES = 'resmon.notes';
 const STORAGE_NOTICES = 'resmon.dismissedNotices';
+const STORAGE_NOTICE_BAR = 'resmon.showNotices';
 
 // ---------- Formatierung ----------
 
@@ -346,6 +347,16 @@ const notes = loadJson(STORAGE_NOTES, {});
 const hiddenColumns = new Set(loadJson(STORAGE_COLUMNS, COLUMNS.filter(c => c.off).map(c => c.key)));
 const dismissedNotices = new Set(loadJson(STORAGE_NOTICES, []));
 
+/* Ob die Meldungsleiste überhaupt erscheint. Anders als das Wegklicken einer
+   einzelnen Meldung gilt dieser Schalter für alle und auch für die, die erst
+   noch kommen — er gehört deshalb in die Einstellungen und nicht an die Leiste.
+
+   Er liegt hier und nicht beim Host: die Leiste ist eine Anzeige des
+   Detailfensters, das Overlay kennt sie nicht. Dasselbe gilt schon für die
+   weggeklickten Meldungen, und zwei Ablagen für dieselbe Sache wären eine zu
+   viel. */
+let showNotices = loadJson(STORAGE_NOTICE_BAR, true) !== false;
+
 state.collapsed = new Set(loadJson(STORAGE_COLLAPSED, []));
 
 // ---------- Spaltenbreiten ----------
@@ -592,6 +603,7 @@ const elements = {
     storageFiles: document.getElementById('storage-files'),
     storageStatus: document.getElementById('storage-status'),
     storageNote: document.getElementById('storage-note'),
+    storageSearch: document.getElementById('storage-search'),
     storageEmpty: document.getElementById('storage-empty'),
     storageHead: document.getElementById('storage-head'),
     storageTable: document.getElementById('storage-table'),
@@ -783,6 +795,14 @@ function noticesFor(diag, cpu = {}) {
 }
 
 function renderNotices(diag, cpu) {
+    // Abgeschaltet heißt abgeschaltet: die Leiste wird geleert und nicht nur
+    // versteckt, sonst hinge sie beim Wiedereinschalten mit dem Stand von vorhin
+    // da, bis der nächste Messpunkt eintrifft.
+    if (!showNotices) {
+        elements.notices.replaceChildren();
+        return;
+    }
+
     const wanted = noticesFor(diag, cpu).filter(notice => !dismissedNotices.has(notice.id));
     const shown = [...elements.notices.children].map(node => node.dataset.id);
 
@@ -3062,6 +3082,7 @@ const settingsUi = {
     scale: document.getElementById('set-scale'),
     scaleValue: document.getElementById('scale-value'),
     clickThrough: document.getElementById('set-clickthrough'),
+    notices: document.getElementById('set-notices'),
     overlayRows: document.getElementById('overlay-rows'),
     chartRows: document.getElementById('chart-rows'),
 };
@@ -3102,6 +3123,17 @@ function buildSettingsPage() {
 
     settingsUi.chartRows.replaceChildren(...CHART_SERIES.map(series =>
         checkboxRow(`chart-${series.key}`, series.label, on => send('setChartRow', { key: series.key, on }))));
+
+    /* Der einzige Schalter dieser Seite, der nicht über den Host läuft: die
+       Meldungsleiste gehört diesem Fenster allein. Deshalb wird er hier auch
+       selbst gesetzt und nicht in applySettings — von dort käme nie eine
+       Antwort, und das Häkchen spränge zurück. */
+    settingsUi.notices.checked = showNotices;
+    settingsUi.notices.addEventListener('change', event => {
+        showNotices = event.target.checked;
+        localStorage.setItem(STORAGE_NOTICE_BAR, JSON.stringify(showNotices));
+        renderNotices(state.diag, state.last?.cpu);
+    });
 }
 
 /** Der Host schickt jede Änderung zurück; die Seite zeigt nie einen eigenen Stand. */
@@ -3321,7 +3353,22 @@ const storage = {
     // demselben Ergebnis entsteht.
     findings: [],
     allFindings: false,
+
+    // Suche im Baum: der gesuchte Text und die Kennungen der Treffer.
+    search: '',
+    hits: new Set(),
+    hitsTruncated: false,
+
+    // Das Blinken der Treffer: bis wann es läuft und in welcher Phase es steht.
+    blinkUntil: 0,
+    blinkPhase: false,
+    blinkTimer: null,
 };
+
+/* So viele Treffer klappt die Suche höchstens auf. Darüber bleibt es beim
+   Hervorheben: „doc" trifft halb C:, und jeden Vorfahren davon aufzuklappen
+   sprengte die Zeilengrenze und machte den Baum unlesbar. */
+const MAX_STORAGE_EXPAND_HITS = 200;
 
 const MAX_STORAGE_ROWS = 800;
 
@@ -3522,6 +3569,9 @@ function renderStorageTable() {
             if (item.node.id === storage.selected) {
                 tr.classList.add('selected');
             }
+            if (storage.hits.has(item.node.id)) {
+                tr.classList.add('storage-hit');
+            }
             if (item.node.id === storage.mapRoot && item.node.id !== storage.root) {
                 tr.classList.add('map-root');
             }
@@ -3557,6 +3607,41 @@ function renderStorageTable() {
         elements.storageStatus.textContent =
             `${nf0.format(MAX_STORAGE_ROWS)} Zeilen — mehr wird nicht gezeigt. Weniger aufklappen.`;
     }
+}
+
+/**
+ * Zerlegt einen Namen in Knoten und hebt jedes Vorkommen des gesuchten Textes
+ * mit `<mark>` hervor. Über Textknoten und nicht über innerHTML: ein Ordner darf
+ * heißen, wie er will, und ein Name mit spitzen Klammern wäre sonst eine Lücke,
+ * durch die fremder Inhalt in die Seite käme.
+ */
+function markMatches(text, term) {
+    const needle = (term || '').toLowerCase();
+    if (!needle) {
+        return [document.createTextNode(text)];
+    }
+
+    const nodes = [];
+    const haystack = text.toLowerCase();
+    let cursor = 0;
+
+    for (let at = haystack.indexOf(needle); at >= 0; at = haystack.indexOf(needle, cursor)) {
+        if (at > cursor) {
+            nodes.push(document.createTextNode(text.slice(cursor, at)));
+        }
+
+        const hit = document.createElement('mark');
+        hit.textContent = text.slice(at, at + needle.length);
+        nodes.push(hit);
+
+        cursor = at + needle.length;
+    }
+
+    if (cursor < text.length) {
+        nodes.push(document.createTextNode(text.slice(cursor)));
+    }
+
+    return nodes.length ? nodes : [document.createTextNode(text)];
 }
 
 function storageNameCell(item, isRest) {
@@ -3596,7 +3681,7 @@ function storageNameCell(item, isRest) {
     }
 
     const name = document.createElement('span');
-    name.textContent = node.name;
+    name.append(...markMatches(node.name, storage.search));
     if (node.isFile) {
         name.className = 'storage-file';
     }
@@ -3676,6 +3761,7 @@ function themePalette() {
         text: parseColor(style.getPropertyValue('--text')),
         panel: parseColor(style.getPropertyValue('--panel')),
         muted: parseColor(style.getPropertyValue('--muted')),
+        notice: parseColor(style.getPropertyValue('--notice')),
     };
 }
 
@@ -3864,6 +3950,10 @@ function drawTreemap() {
                 layout(item.id, tileX + 2, tileY + 18, tileW - 4, tileH - 20, depth + 1);
             }
 
+            if (storage.hits.has(item.id)) {
+                markHit(context, tileX, tileY, tileW, tileH);
+            }
+
             if (item.id === storage.selected) {
                 context.strokeStyle = rgb(palette.text);
                 context.lineWidth = 2;
@@ -3873,6 +3963,93 @@ function drawTreemap() {
     };
 
     layout(storage.mapRoot, 0, 0, width, height, 0);
+}
+
+/* Ein Treffer bekommt einen doppelten Rahmen und keine Füllung: die Fläche einer
+   Kachel *ist* ihre Größe, und die darf eine Suche nicht überdecken.
+
+   Doppelt, weil eine einzelne Farbe es nicht leisten kann. Die Karte trägt die
+   ganze Palette in mehreren Helligkeiten nebeneinander — was auf der einen
+   Kachel heraussticht, verschwindet auf der nächsten. Das gilt für Gelb genauso
+   wie für jede andere Farbe, die man stattdessen wählte. Ein Paar aus fast
+   Schwarz und reinem Weiß hängt dagegen nicht am Farbton, sondern am Kontrast:
+   auf einer hellen Kachel trägt der dunkle Ring, auf einer dunklen der helle,
+   und einer von beiden liegt immer an. */
+const HIT_DARK = '#08090c';
+const HIT_LIGHT = '#ffffff';
+
+/* Ab hier bleibt von einem Rahmen kein Inneres mehr übrig — dann ist die volle
+   Fläche die einzige Marke, die auf einer solchen Kachel noch sichtbar ist. */
+const HIT_MIN_TILE = 12;
+
+function markHit(context, x, y, w, h) {
+    // Beim Blinken tauschen die beiden Ringe die Rollen. Das bewegt sich
+    // deutlich, ohne dass ein Bildpunkt Fläche hinzukommt oder wegfällt.
+    const outer = storage.blinkPhase ? HIT_LIGHT : HIT_DARK;
+    const inner = storage.blinkPhase ? HIT_DARK : HIT_LIGHT;
+
+    if (w < HIT_MIN_TILE || h < HIT_MIN_TILE) {
+        context.fillStyle = inner;
+        context.fillRect(x, y, w, h);
+        context.strokeStyle = outer;
+        context.lineWidth = 1;
+        context.strokeRect(x + 0.5, y + 0.5, Math.max(0, w - 1), Math.max(0, h - 1));
+        return;
+    }
+
+    /* Die beiden Ringe liegen nebeneinander und nicht übereinander: mit
+       demselben Rechteck und verschiedenen Strichstärken deckt der schmalere
+       den breiteren in der Mitte ab, und vom unteren bliebe rechts und links je
+       ein Pixel übrig. Zwei Bänder zu je zwei Pixeln sind auf einer Karte, die
+       jede Farbe der Palette trägt, der Unterschied zwischen „sichtbar" und
+       „muss man suchen". */
+    context.lineWidth = 2;
+
+    context.strokeStyle = outer;
+    context.strokeRect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2));
+
+    context.strokeStyle = inner;
+    context.strokeRect(x + 3, y + 3, Math.max(0, w - 6), Math.max(0, h - 6));
+}
+
+/* Wie lange die Treffer blinken und wie schnell. Das Blinken beantwortet „wo ist
+   es hin", der stehenbleibende Rahmen danach „wo ist es". Ein Blinken, das nicht
+   aufhört, wäre das Gegenteil einer Hilfe: die Karte ist zum Hinsehen da, und
+   niemand liest neben etwas, das zuckt.
+
+   Neu gezeichnet wird nur beim Phasenwechsel, nicht Bild für Bild — ein
+   vollständiger Aufbau der Karte kostet bei einer Viertelmillion Knoten zu viel,
+   um ihn sechzigmal in der Sekunde zu machen, und für ein Blinken bringt er
+   nichts. */
+const HIT_BLINK_MS = 1500;
+const HIT_BLINK_STEP = 190;
+
+function stopHitBlink() {
+    if (storage.blinkTimer !== null) {
+        clearInterval(storage.blinkTimer);
+        storage.blinkTimer = null;
+    }
+    storage.blinkPhase = false;
+}
+
+function startHitBlink() {
+    stopHitBlink();
+
+    if (!storage.hits.size) {
+        return;
+    }
+
+    storage.blinkUntil = performance.now() + HIT_BLINK_MS;
+    storage.blinkPhase = true;
+
+    storage.blinkTimer = setInterval(() => {
+        if (performance.now() >= storage.blinkUntil) {
+            stopHitBlink();
+        } else {
+            storage.blinkPhase = !storage.blinkPhase;
+        }
+        drawTreemap();
+    }, HIT_BLINK_STEP);
 }
 
 function drawTileLabel(context, label, fill, palette, x, y, w, header) {
@@ -4107,12 +4284,14 @@ function renderScan(data) {
     storage.expanded.add(storage.root);
     storage.findings = data.findings || [];
 
-    elements.storageStatus.textContent = storageSummaryText();
     renderStorageNote();
     renderStorageHead();
-    renderStorageTable();
+
+    // Nach einem neuen Lauf sind die alten Trefferkennungen wertlos: sie zeigen
+    // in den Baum von vorhin. Der Suchtext bleibt stehen und wird neu angewandt.
+    applyStorageSearch();
+
     renderCrumbs();
-    drawTreemap();
     renderStorageFindings();
 }
 
@@ -4374,6 +4553,31 @@ if (host) {
             return;
         }
 
+        // Zustand des Datenträgers: Messung, Fortschritt eines Laufs, Ergebnis.
+        if (data.type === 'defrag') {
+            if (data.phase === 'running') {
+                defragState.running = true;
+                renderDefrag();
+                defrag.status.textContent = data.message || 'Läuft …';
+                return;
+            }
+
+            defragState.running = false;
+
+            if (data.phase === 'analysis') {
+                defragState.report = data;
+            } else if (data.phase === 'done') {
+                defrag.note.textContent = data.message || '';
+                defrag.note.hidden = !data.message;
+                renderDefrag();
+                defrag.status.textContent = data.message || 'Fertig.';
+                return;
+            }
+
+            renderDefrag();
+            return;
+        }
+
         // Das Programm-Inventar. Wie der Ordner-Scan und die Startanalyse eine
         // eigene Nachricht: sie entsteht auf Anforderung und nicht im Takt.
         if (data.type === 'programs') {
@@ -4383,6 +4587,18 @@ if (host) {
             renderProgramsNote();
             programs.status.textContent =
                 `${nf0.format(data.programs?.length || 0)} Programme  ·  erhoben ${dateText(data.collectedAt)}`;
+            return;
+        }
+
+        // Die Temp-Erhebung und das Ergebnis eines Löschlaufs. Beide erscheinen
+        // ausschließlich auf Knopfdruck im Reiter „Speicher".
+        if (data.type === 'temp') {
+            applyTempReport(data);
+            return;
+        }
+
+        if (data.type === 'tempRemoval') {
+            applyTempRemoval(data);
             return;
         }
 
@@ -5571,6 +5787,16 @@ function buildStorageFinding(finding) {
 
     body.append(title, why);
 
+    /* „Warum das hier steht" — getrennt von „was das ist". Der Ort ist auf jedem
+       Rechner derselbe, der Vorschlag hängt an der gemessenen Lage; wären beide
+       in einem Absatz, läse sich jeder Befund als Aufforderung. */
+    if (finding.reason) {
+        const reason = document.createElement('p');
+        reason.className = 'reason';
+        reason.textContent = finding.reason;
+        body.append(reason);
+    }
+
     const handles = buildFindingHandles(finding);
     if (handles) {
         body.append(handles);
@@ -5612,8 +5838,9 @@ function buildStorageFinding(finding) {
 function buildFindingHandles(finding) {
     const commands = finding.commands || [];
     const hasNode = finding.node !== null && finding.node !== undefined;
+    const action = FINDING_ACTIONS[finding.action];
 
-    if (!commands.length && !hasNode) {
+    if (!commands.length && !hasNode && !action) {
         return null;
     }
 
@@ -5634,43 +5861,357 @@ function buildFindingHandles(finding) {
 
         const code = document.createElement('code');
         code.className = 'command';
-        code.textContent = command;
-        code.title = command;
+        code.textContent = command.text;
+        code.title = command.text;
 
         const copy = document.createElement('button');
         copy.type = 'button';
         copy.className = 'toggle';
         copy.textContent = 'Kopieren';
         copy.title = 'Legt den Befehl in die Zwischenablage. Ausgeführt wird er hier nicht.';
-        copy.addEventListener('click', () => send('copyText', { name: command }));
+        copy.addEventListener('click', () => send('copyText', { name: command.text }));
 
-        row.append(code, copy);
+        /* Der zweite Knopf nimmt drei Handgriffe ab, bei denen etwas schiefgehen
+           kann: Fenster öffnen, einfügen, und dabei das richtige Fenster
+           erwischen. Der Befehl steht danach fertig getippt da — abgeschickt
+           wird er nicht, das bleibt ein Tastendruck des Benutzers. */
+        const shell = document.createElement('button');
+        shell.type = 'button';
+        shell.className = 'toggle';
+        shell.textContent = 'In PowerShell öffnen';
+        shell.title = 'Öffnet ein PowerShell-Fenster, in dem dieser Befehl bereits in der '
+            + 'Eingabezeile steht. Ausgeführt wird er erst mit Enter — bis dahin lässt er '
+            + 'sich lesen, ändern oder verwerfen.\n\nDas Fenster läuft mit denselben '
+            + 'erhöhten Rechten wie diese Anwendung.';
+        shell.addEventListener('click', () => send('openShell', { name: command.text }));
+
+        row.append(code, copy, shell);
         box.append(row);
+
+        /* Was der Befehl tut, unter dem Befehl und nicht als Hover: ein Hinweis,
+           den man erst finden muss, wird bei genau der Zeile nicht gefunden, bei
+           der es darauf ankommt. */
+        if (command.does) {
+            const does = document.createElement('p');
+            does.className = 'command-does';
+            does.textContent = command.does;
+            box.append(does);
+        }
     });
 
-    if (hasNode) {
+    if (hasNode || action) {
         const row = document.createElement('div');
         row.className = 'handle';
 
-        const reveal = document.createElement('button');
-        reveal.type = 'button';
-        reveal.className = 'toggle';
-        reveal.textContent = 'Im Explorer zeigen';
-        reveal.title = 'Zeigt den Fundort im Explorer.';
-        reveal.addEventListener('click', () =>
-            send('openFolder', { scan: storage.scanId, node: finding.node }));
+        if (hasNode) {
+            const reveal = document.createElement('button');
+            reveal.type = 'button';
+            reveal.className = 'toggle';
+            reveal.textContent = 'Im Explorer zeigen';
+            reveal.title = 'Zeigt den Fundort im Explorer.';
+            reveal.addEventListener('click', () =>
+                send('openFolder', { scan: storage.scanId, node: finding.node }));
+            row.append(reveal);
+        }
 
-        row.append(reveal);
+        if (action) {
+            const extra = document.createElement('button');
+            extra.type = 'button';
+            extra.className = 'toggle';
+            extra.textContent = action.label;
+            extra.title = action.title;
+            extra.addEventListener('click', action.run);
+            row.append(extra);
+        }
+
         box.append(row);
     }
 
     return box;
 }
 
+/* Erhebungen, die ein Befund anbieten kann. Der Befund nennt nur den Schlüssel;
+   wie der Knopf heißt und was er auslöst, steht hier — der Ordnerbaum weiß
+   nichts von Ansichten. */
+const FINDING_ACTIONS = {
+    tempOrphans: {
+        label: 'Verwaiste Temp-Reste suchen',
+        title: 'Geht beide Temp-Ordner Posten für Posten durch und hält jeden gegen die '
+            + 'installierten Programme und die laufenden Prozesse.\n\nWas zu keinem von beiden '
+            + 'passt, gehört zu einem Programm, das es hier nicht mehr gibt — und wird deshalb '
+            + 'nie wieder aufgeräumt.\n\nDie Erhebung dauert einige Sekunden und verändert '
+            + 'nichts.',
+        run: () => requestTempInventory(),
+    },
+};
+
 storageFindings.all.addEventListener('change', event => {
     storage.allFindings = event.target.checked;
     renderStorageFindings();
 });
+
+// ---------- Verwaiste Temp-Reste ----------
+
+/* Die einzige Liste dieser Anwendung, an deren Ende gelöscht wird. Entsprechend
+   umständlich ist sie mit Absicht: erst erheben, dann jeden Posten einzeln
+   ankreuzen, dann eine Rückfrage des Hosts, die die Namen nennt.
+
+   Angekreuzt werden kann nur, was als verwaist eingestuft ist. Die übrigen
+   Posten lassen sich einblenden, aber nicht auswählen — sie stehen da, damit
+   die Einstufung nachprüfbar ist und nicht geglaubt werden muss. */
+
+const tempUi = {
+    panel: document.getElementById('storage-temp-panel'),
+    list: document.getElementById('storage-temp-list'),
+    empty: document.getElementById('storage-temp-empty'),
+    limits: document.getElementById('storage-temp-limits'),
+    status: document.getElementById('storage-temp-status'),
+    showAll: document.getElementById('storage-temp-all'),
+    selectAll: document.getElementById('storage-temp-select-all'),
+    selection: document.getElementById('storage-temp-selection'),
+    remove: document.getElementById('storage-temp-delete'),
+};
+
+const tempState = {
+    report: null,
+    busy: false,
+    showAll: false,
+    selected: new Set(),
+
+    /* Was sich beim letzten Lauf nicht löschen ließ. Steht getrennt von den
+       Einschränkungen der Erhebung, weil es sie überleben muss: nach dem
+       Löschen wird sofort neu erhoben, und deren Liste käme leer zurück — die
+       Meldung „diese drei blieben liegen" wäre damit weg, bevor sie jemand
+       gelesen hat. */
+    errors: [],
+};
+
+/* Was die Einstufungen bedeuten — Beschriftung, Farbe und der Satz dahinter.
+
+   Die Klassen tragen alle das Präfix „state-": die Zeile selbst heißt `.orphan`,
+   und ohne das Präfix träfe ein Selektor auf `.orphan` beide — die Zeile und das
+   Abzeichen darin. */
+const TEMP_OWNERS = {
+    orphan: {
+        label: 'verwaist',
+        className: 'state-orphan',
+        help: 'Kein installiertes Programm und kein laufender Prozess trägt diesen Namen, und '
+            + 'seit über einer Woche hat niemand hineingeschrieben.',
+    },
+    installed: {
+        label: 'zugeordnet',
+        className: 'state-installed',
+        help: 'Gehört zu einem Programm, das installiert ist. Es räumt seinen Ordner selbst '
+            + 'auf — irgendwann.',
+    },
+    running: {
+        label: 'in Benutzung',
+        className: 'state-running',
+        help: 'Ein Prozess dieses Namens läuft gerade. Hier wird in diesem Moment gearbeitet.',
+    },
+    anonymous: {
+        label: 'namenlos',
+        className: 'state-anonymous',
+        help: 'Zufallsname ohne Aussage über seinen Urheber. Von hier aus nicht zu entscheiden, '
+            + 'wem er gehört — deshalb nicht auswählbar.',
+    },
+    recent: {
+        label: 'zu frisch',
+        className: 'state-recent',
+        help: 'Sieht verwaist aus, wurde aber vor weniger als einer Woche noch beschrieben. '
+            + 'Ein Installer, der auf einen Neustart wartet, sähe genauso aus.',
+    },
+};
+
+function requestTempInventory() {
+    if (tempState.busy) {
+        return;
+    }
+
+    tempState.busy = true;
+    tempState.errors = [];
+    tempUi.panel.hidden = false;
+    tempUi.status.textContent = 'Temp-Ordner werden durchgesehen …';
+    tempUi.remove.disabled = true;
+
+    // In Sicht bringen: der Knopf steht in einem Panel, das in sich scrollt, und
+    // das Ergebnis erscheint darunter — ohne das bliebe es unbemerkt.
+    tempUi.panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+    send('requestTemp');
+}
+
+function applyTempReport(data) {
+    tempState.busy = false;
+    tempState.report = data;
+    tempState.selected.clear();
+    tempUi.selectAll.checked = false;
+    tempUi.panel.hidden = false;
+    renderTempList();
+}
+
+function tempEntries() {
+    const entries = tempState.report?.entries || [];
+    return tempState.showAll ? entries : entries.filter(entry => entry.owner === 'orphan');
+}
+
+function renderTempList() {
+    const report = tempState.report;
+    if (!report) {
+        return;
+    }
+
+    const orphans = (report.entries || []).filter(entry => entry.owner === 'orphan');
+    const rows = tempEntries();
+
+    tempUi.status.textContent = [
+        `${nf0.format(report.entries.length)} Posten in ${report.roots.length} Ordnern`,
+        `${nf0.format(orphans.length)} davon verwaist (${formatBytes(report.orphanBytes)})`,
+        `abgeglichen mit ${nf0.format(report.knownPrograms)} installierten Programmen`,
+    ].join('  ·  ');
+
+    tempUi.empty.hidden = rows.length > 0;
+    tempUi.list.replaceChildren(...rows.map(buildTempRow));
+
+    // Fehlschläge des letzten Löschlaufs zuerst: sie betreffen das, was der
+    // Benutzer gerade getan hat, die Einschränkungen der Erhebung nur das, was
+    // sie ohnehin nicht weiß.
+    const limits = [...tempState.errors, ...(report.limitations || [])];
+    tempUi.limits.hidden = limits.length === 0;
+    tempUi.limits.replaceChildren(...limits.map(text => {
+        const item = document.createElement('li');
+        item.textContent = text;
+        return item;
+    }));
+
+    updateTempSelection();
+}
+
+function buildTempRow(entry) {
+    const kind = TEMP_OWNERS[entry.owner] || TEMP_OWNERS.anonymous;
+    const selectable = entry.owner === 'orphan';
+
+    const row = document.createElement('div');
+    row.className = `orphan${selectable ? '' : ' fixed'}`;
+
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = tempState.selected.has(entry.index);
+    box.disabled = !selectable;
+    box.title = selectable
+        ? 'Diesen Posten zum Löschen vormerken.'
+        : 'Nur verwaiste Posten lassen sich auswählen.';
+    box.addEventListener('change', () => {
+        if (box.checked) {
+            tempState.selected.add(entry.index);
+        } else {
+            tempState.selected.delete(entry.index);
+        }
+        updateTempSelection();
+    });
+
+    const badge = document.createElement('span');
+    badge.className = `owner ${kind.className}`;
+    badge.textContent = kind.label;
+    badge.title = kind.help;
+
+    const size = document.createElement('span');
+    size.className = 'orphan-size';
+    size.textContent = formatBytes(entry.bytes);
+
+    const body = document.createElement('div');
+
+    const name = document.createElement('p');
+    name.className = 'orphan-name';
+    name.textContent = entry.name;
+    name.title = entry.path;
+
+    const detail = document.createElement('p');
+    detail.className = 'orphan-detail';
+    detail.textContent = [
+        entry.isDirectory ? `Ordner mit ${nf0.format(entry.files)} Dateien` : 'Einzelne Datei',
+        `zuletzt geschrieben ${formatDay(entry.lastWrite)}`,
+        entry.program ? `passt zu ${entry.program}` : null,
+    ].filter(Boolean).join('  ·  ');
+
+    const evidence = document.createElement('p');
+    evidence.className = 'orphan-evidence';
+    evidence.textContent = entry.evidence;
+
+    body.append(name, detail, evidence);
+    row.append(box, badge, size, body);
+    return row;
+}
+
+/* Nur das Datum, nicht die Uhrzeit: bei einem Posten, der seit Monaten liegt,
+   ist die Minute keine Auskunft, sondern Ballast in einer ohnehin dichten
+   Zeile. */
+function formatDay(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime())
+        ? 'unbekannt'
+        : date.toLocaleDateString('de-DE', { year: 'numeric', month: '2-digit', day: '2-digit' });
+}
+
+function updateTempSelection() {
+    const entries = tempState.report?.entries || [];
+    const chosen = entries.filter(entry => tempState.selected.has(entry.index));
+    const bytes = chosen.reduce((sum, entry) => sum + entry.bytes, 0);
+
+    tempUi.selection.textContent = chosen.length === 0
+        ? 'Nichts ausgewählt.'
+        : `${nf0.format(chosen.length)} ausgewählt  ·  ${formatBytes(bytes)}`;
+
+    tempUi.remove.disabled = chosen.length === 0 || tempState.busy;
+}
+
+tempUi.showAll.addEventListener('change', event => {
+    tempState.showAll = event.target.checked;
+    renderTempList();
+});
+
+tempUi.selectAll.addEventListener('change', event => {
+    const orphans = (tempState.report?.entries || []).filter(entry => entry.owner === 'orphan');
+
+    if (event.target.checked) {
+        for (const entry of orphans) {
+            tempState.selected.add(entry.index);
+        }
+    } else {
+        tempState.selected.clear();
+    }
+
+    renderTempList();
+});
+
+tempUi.remove.addEventListener('click', () => {
+    if (tempState.busy || tempState.selected.size === 0) {
+        return;
+    }
+
+    // Die Rückfrage stellt der Host: er kennt die Posten, die er selbst erhoben
+    // hat, und benennt im Dialog, was tatsächlich verschwindet. Die Seite
+    // schickt nur die Indizes.
+    tempState.busy = true;
+    tempUi.remove.disabled = true;
+    send('removeTemp', { items: [...tempState.selected] });
+});
+
+function applyTempRemoval(data) {
+    tempState.busy = false;
+
+    /* Fehlschläge einzeln und vollständig. „3 Posten ließen sich nicht löschen"
+       beantwortete die einzige Frage nicht, die dann noch offen ist: welche
+       drei — und warum. */
+    tempState.errors = data.errors || [];
+
+    const parts = [`${nf0.format(data.removed)} gelöscht`, `${formatBytes(data.bytesFreed)} frei`];
+    if (data.failed > 0) {
+        parts.push(`${nf0.format(data.failed)} nicht löschbar`);
+    }
+
+    tempUi.status.textContent = `${parts.join('  ·  ')} — wird neu erhoben …`;
+}
 
 // ---------- Reiter „Programme" ----------
 
@@ -5915,3 +6456,224 @@ programs.onlyStale.addEventListener('change', event => {
 
 renderColumnHead(programs.head, 'programs', PROGRAM_COLUMNS, applyProgramWidths);
 wireProgramSorting();
+
+// ---------- Suche im Ordnerbaum ----------
+
+/* Gesucht wird in dem, was da ist: im Auszug des Scans und in allem, was
+   nachgeladen wurde. Der Host hält den vollen Baum, die Seite nur die großen
+   Zweige — eine Suche über alle 300.000 Ordner müsste ihn also fragen. Für die
+   Frage „wo steckt Docker" reicht der Auszug, denn was klein genug war,
+   herauszufallen, erklärt auch keine volle Partition. */
+
+function applyStorageSearch() {
+    const term = storage.search.toLowerCase();
+
+    storage.hits.clear();
+    storage.hitsTruncated = false;
+
+    if (term) {
+        for (const [id, node] of storage.nodes) {
+            if (node.name.toLowerCase().includes(term)) {
+                storage.hits.add(id);
+            }
+        }
+
+        // Ein Treffer, dessen Ordner zugeklappt ist, ist unsichtbar — und eine
+        // Suche, die nichts zeigt, sieht aus wie „nichts gefunden".
+        if (storage.hits.size <= MAX_STORAGE_EXPAND_HITS) {
+            for (const id of storage.hits) {
+                let cursor = storage.nodes.get(id)?.parent ?? -1;
+                while (cursor >= 0 && storage.nodes.has(cursor)) {
+                    storage.expanded.add(cursor);
+                    cursor = storage.nodes.get(cursor).parent;
+                }
+            }
+        } else {
+            storage.hitsTruncated = true;
+        }
+    }
+
+    renderStorageTable();
+
+    // Erst die Phase setzen, dann zeichnen — sonst zeigte das erste Bild den
+    // ruhenden Rahmen und das Blinken finge sichtbar verspätet an.
+    startHitBlink();
+    drawTreemap();
+    updateStorageStatus();
+}
+
+/* Der Status trägt zwei Dinge: die Zusammenfassung des Laufs und, sofern
+   gesucht wird, die Zahl der Treffer. Getrennte Anzeigen dafür hätte die Leiste
+   nicht hergegeben. */
+function updateStorageStatus() {
+    if (!storage.summary) {
+        return;
+    }
+
+    let text = storageSummaryText();
+
+    if (storage.search) {
+        const count = storage.hits.size;
+        text += count === 0
+            ? `  ·  keine Treffer für „${storage.search}"`
+            : `  ·  ${nf0.format(count)} Treffer für „${storage.search}"`;
+
+        if (storage.hitsTruncated) {
+            text += ' (zu viele zum Aufklappen — nur hervorgehoben)';
+        }
+    }
+
+    elements.storageStatus.textContent = text;
+}
+
+elements.storageSearch.addEventListener('input', event => {
+    storage.search = event.target.value.trim();
+    applyStorageSearch();
+});
+
+// ---------- Zustand des Datenträgers ----------
+
+/* Zwei Knöpfe, die den Datenträger selbst betreffen und nicht den Ordnerbaum:
+   messen, wie zerstückelt die Partition ist, und ausführen, was Windows für
+   dieses Medium vorsieht.
+
+   „Optimieren" und nicht „Defragmentieren": auf einer SSD gibt es keine
+   Kopfbewegung, die eine zerstückelte Datei teurer machte. Windows führt dort
+   ein Retrim aus, kein Defragmentieren — und ein erzwungenes Defragmentieren
+   brächte keine Geschwindigkeit, sondern nur Schreibzyklen. Die Beschriftung
+   folgt deshalb dem Medium. */
+
+const defrag = {
+    analyze: document.getElementById('storage-analyze'),
+    optimize: document.getElementById('storage-optimize'),
+    cancel: document.getElementById('storage-optimize-cancel'),
+    status: document.getElementById('storage-defrag-status'),
+    note: document.getElementById('storage-defrag-note'),
+};
+
+const defragState = { report: null, running: false };
+
+function renderDefrag() {
+    const report = defragState.report;
+
+    if (defragState.running) {
+        defrag.analyze.disabled = true;
+        defrag.optimize.disabled = true;
+        defrag.cancel.hidden = false;
+        return;
+    }
+
+    defrag.analyze.disabled = false;
+    defrag.cancel.hidden = true;
+    defrag.optimize.disabled = !report || !report.fields;
+    defrag.optimize.textContent = report ? report.actionLabel : 'Optimieren';
+    defrag.optimize.title = optimizeHelp(report);
+
+    if (!report) {
+        defrag.status.textContent = 'Noch nicht gemessen.';
+        defrag.note.hidden = true;
+        return;
+    }
+
+    if (!report.fields) {
+        defrag.status.textContent = 'Windows hat keine Zahlen geliefert.';
+        defrag.note.textContent = 'Die Messung verlangt Administratorrechte. Läuft ResMon erhöht, '
+            + 'kann auch ein laufender Wartungslauf von Windows die Auskunft blockieren — '
+            + 'dann später erneut messen.';
+        defrag.note.hidden = false;
+        return;
+    }
+
+    defrag.status.textContent = [
+        `Dateien ${percentText(report.filePercent)}`,
+        `freier Platz ${percentText(report.freeSpacePercent)}`,
+        `gesamt ${percentText(report.totalPercent)}`,
+        `${nf0.format(report.fragmentedFiles || 0)} von ${nf0.format(report.totalFiles || 0)} Dateien zerstückelt`,
+        `${nf1.format(report.seconds || 0)} s`,
+    ].join('  ·  ');
+
+    const notes = [];
+
+    // Der wichtigste Satz der ganzen Anzeige. Ohne ihn liest sich „15 %
+    // zerstückelt" auf einer SSD als Handlungsbedarf, und das ist es nicht.
+    if (!report.fragmentationMatters) {
+        notes.push('Dieser Datenträger ist eine SSD. Es gibt keine Kopfbewegung, die eine '
+            + 'zerstückelte Datei langsamer machte — die Prozente beschreiben die Buchführung '
+            + 'des Dateisystems, nicht die Geschwindigkeit. Defragmentieren brächte hier nichts '
+            + 'und kostete Schreibzyklen; Windows führt stattdessen ein Retrim aus, das dem '
+            + 'Datenträger die freien Blöcke meldet.');
+    }
+
+    if (report.defragRecommended) {
+        notes.push('Windows selbst hält einen Lauf für angebracht.');
+    }
+
+    if (report.mftPercentInUse !== null && report.mftPercentInUse !== undefined) {
+        notes.push(`Die Master File Table ist zu ${report.mftPercentInUse} % belegt.`);
+    }
+
+    defrag.note.textContent = notes.join(' ');
+    defrag.note.hidden = notes.length === 0;
+}
+
+function percentText(value) {
+    return value === null || value === undefined ? '–' : `${value} %`;
+}
+
+/* Der Hover erklärt den Unterschied, den die Beschriftung nur andeutet.
+   „Defragmentieren" und „TRIM" sind zwei verschiedene Vorgänge mit
+   verschiedenen Zwecken, und welcher davon läuft, entscheidet das Medium und
+   nicht der Benutzer. Solange nichts gemessen ist, steht beides da — welches
+   Medium es ist, weiß die Seite dann nämlich noch nicht. */
+function optimizeHelp(report) {
+    const common = '\n\nBeides schafft keinen Platz. Es ordnet, was ohnehin da liegt.';
+
+    if (!report || !report.fields) {
+        return 'Führt aus, was Windows für dieses Medium vorsieht — auf einer Festplatte ein '
+            + 'Defragmentierlauf, auf einer SSD ein Retrim. Erst messen: vorher steht weder das '
+            + 'Medium noch fest, ob überhaupt etwas zu tun wäre.' + common;
+    }
+
+    if (report.fragmentationMatters) {
+        return 'Defragmentieren: Windows schiebt die Bruchstücke einer Datei wieder hintereinander. '
+            + 'Auf einer Festplatte lohnt das, weil der Schreib-Lese-Kopf für jedes Bruchstück neu '
+            + 'positionieren muss — genau diese Bewegung ist das Langsame daran.'
+            + '\n\nDer Lauf verschiebt Daten, verliert keine und lässt sich jederzeit abbrechen. '
+            + 'Er dauert je nach Füllstand Minuten bis Stunden.' + common;
+    }
+
+    return 'TRIM (Retrim): Windows meldet der SSD, welche Blöcke aus Sicht des Dateisystems frei '
+        + 'sind. Der Datenträger weiß das von sich aus nicht — gelöscht wird für ihn nur der '
+        + 'Verweis, nicht der Inhalt. Erst mit dieser Meldung kann er die Blöcke im Voraus leeren, '
+        + 'statt beim nächsten Schreiben darauf zu warten.'
+        + '\n\nDefragmentiert wird hier ausdrücklich nicht: eine SSD kennt keine Kopfbewegung, die '
+        + 'ein Bruchstück teurer machte. Ein erzwungener Lauf brächte keine Geschwindigkeit und '
+        + 'kostete Schreibzyklen.' + common;
+}
+
+function requestAnalyze() {
+    const drive = elements.storageDrive.value;
+    if (!drive) {
+        return;
+    }
+
+    defragState.running = true;
+    renderDefrag();
+    defrag.status.textContent = `${drive} wird gemessen — das dauert je nach Partition Sekunden bis Minuten …`;
+    send('analyzeVolume', { path: drive.endsWith('\\') ? drive : `${drive}\\` });
+}
+
+function requestOptimize() {
+    const drive = elements.storageDrive.value;
+    if (!drive) {
+        return;
+    }
+
+    // Die Rückfrage stellt der Host, nicht die Seite: er kennt das Medium und
+    // benennt im Dialog, was tatsächlich läuft.
+    send('optimizeVolume', { path: drive.endsWith('\\') ? drive : `${drive}\\` });
+}
+
+defrag.analyze.addEventListener('click', requestAnalyze);
+defrag.optimize.addEventListener('click', requestOptimize);
+defrag.cancel.addEventListener('click', () => send('cancelOptimize'));

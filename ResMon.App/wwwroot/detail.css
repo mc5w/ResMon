@@ -260,9 +260,12 @@ body {
     border-bottom-color: var(--cpu);
 }
 
-/* Die Einstellungen sind kein Datenblatt wie die anderen beiden Reiter und
-   sitzen deshalb abgesetzt am rechten Rand. */
-.tab[data-view="settings"] {
+/* Logs und Einstellungen sind keine Datenblätter wie die Reiter davor: der eine
+   zeigt, was die Anwendung an sich selbst bemerkt hat, der andere stellt sie
+   ein. Beide sitzen deshalb abgesetzt am rechten Rand, das Protokoll links
+   neben den Einstellungen. Der Zwischenraum trägt hier die Aussage — ein
+   weiterer Reiter in der Reihe ließe sie untergehen. */
+.tab[data-view="logs"] {
     margin-left: auto;
 }
 
@@ -464,6 +467,17 @@ body {
 .controls .status {
     margin-left: auto;
     font-variant-numeric: tabular-nums;
+}
+
+/* Eine Aufschrift vor einer Knopfgruppe, die sagt, worauf sie sich bezieht. Die
+   gepunktete Unterstreichung ist das übliche Zeichen dafür, dass hier eine
+   Erklärung im Hover liegt — ohne sie fände sie niemand. */
+.controls-label {
+    font-weight: 600;
+    color: var(--text);
+    cursor: help;
+    text-decoration: underline dotted var(--border) 1px;
+    text-underline-offset: 3px;
 }
 
 /* Ein Schalter, der wie eine Schaltfläche aussieht: eingerastet trägt er die
@@ -2215,6 +2229,21 @@ td.conn-none {
     max-width: 96ch;
 }
 
+/* Die Begründung steht abgesetzt unter der Beschreibung: „was ist das hier" und
+   „warum schlage ich das vor" sind zwei verschiedene Aussagen, und in einem
+   Absatz verschmölzen sie zu einer Aufforderung. Der Strich links trennt sie,
+   ohne eine weitere Farbe einzuführen — die Hinweisfarbe ist schon vergeben,
+   die trägt der Vorbehalt. */
+.finding .reason {
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.55;
+    margin-top: 6px;
+    padding-left: 9px;
+    border-left: 2px solid var(--grid);
+    max-width: 96ch;
+}
+
 .finding .evidence {
     color: var(--muted);
     font-size: 11px;
@@ -2266,6 +2295,18 @@ td.conn-none {
     min-width: 0;
 }
 
+/* Was ein Befehl tut, direkt unter ihm. Eingerückt auf die Kante des
+   Befehlsfelds, damit die Zuordnung auch bei mehreren Schritten eindeutig
+   bleibt — ohne die Einrückung liest sich der Satz als Erklärung des nächsten
+   Schritts statt des vorigen. */
+.finding .command-does {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.5;
+    margin: 3px 0 0 22px;
+    max-width: 92ch;
+}
+
 /* Der Vorbehalt steht in der Hinweisfarbe und nicht in der Textfarbe: er ist
    der Teil, der beim Überfliegen als Erstes wegfällt, und genau der, der
    gelesen werden muss, bevor jemand den Befehl kopiert. */
@@ -2275,6 +2316,175 @@ td.conn-none {
     line-height: 1.55;
     margin-top: 5px;
     max-width: 96ch;
+}
+
+/* ---------- Verwaiste Temp-Reste ---------- */
+
+/* Dieselbe Höhenschranke wie bei den Befunden und aus demselben Grund: Baum und
+   Karte sind der Zweck des Reiters und sollen von keiner Liste darunter
+   zusammengedrückt werden. */
+.storage-temp-panel {
+    flex: 0 1 auto;
+    max-height: 46%;
+    overflow-y: auto;
+}
+
+.orphan-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.orphan {
+    display: grid;
+    grid-template-columns: 18px 92px 76px minmax(0, 1fr);
+    gap: 10px;
+    align-items: baseline;
+    padding: 8px 0;
+    border-top: 1px solid var(--grid);
+}
+
+.orphan:first-child {
+    border-top: 0;
+}
+
+/* Ein Posten, den man nicht anhaken kann, steht gedämpft da. Er ist nicht
+   überflüssig — er belegt, dass die Zuordnung stattgefunden hat —, aber er ist
+   nicht das, wonach in dieser Liste gesucht wird. */
+.orphan.fixed {
+    opacity: 0.62;
+}
+
+.orphan input[type="checkbox"] {
+    justify-self: center;
+    cursor: pointer;
+}
+
+.orphan.fixed input[type="checkbox"] {
+    cursor: not-allowed;
+}
+
+.orphan .owner {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 4px;
+    text-align: center;
+    cursor: help;
+}
+
+/* „verwaist" ist der einzige Zustand, der zu etwas auffordert, und trägt
+   deshalb als einziger die Warnfarbe. Die übrigen sind Auskünfte. */
+.orphan .owner.state-orphan {
+    background: rgba(248, 113, 113, 0.18);
+    color: #f87171;
+}
+
+.orphan .owner.state-recent {
+    background: rgba(252, 211, 77, 0.16);
+    color: var(--notice);
+}
+
+.orphan .owner.state-running {
+    background: color-mix(in srgb, var(--gpu) 18%, transparent);
+    color: var(--gpu);
+}
+
+.orphan .owner.state-installed,
+.orphan .owner.state-anonymous {
+    background: var(--hover);
+    color: var(--muted);
+}
+
+.orphan-size {
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    font-size: 13px;
+    text-align: right;
+}
+
+.orphan-name {
+    font-size: 12.5px;
+    word-break: break-all;
+}
+
+.orphan-detail {
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 2px;
+}
+
+.orphan-evidence {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.5;
+    margin-top: 3px;
+    opacity: 0.85;
+    max-width: 96ch;
+}
+
+/* Die Leiste mit dem Löschknopf klebt am unteren Rand des Panels: die Liste
+   scrollt in sich, und ein Knopf, der dabei aus dem Bild wandert, wäre nach dem
+   Ankreuzen des letzten Postens nicht mehr da. */
+.orphan-actions {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 12px;
+    color: var(--muted);
+}
+
+.orphan-actions label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.orphan-actions .status {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Der einzige Knopf der Anwendung, der etwas unwiderruflich entfernt. Er sieht
+   auch so aus — nicht als Schmuck, sondern damit er sich vom „Kopieren"
+   daneben unterscheidet, das nichts anrichtet. */
+.toggle.danger:not(:disabled) {
+    border-color: rgba(248, 113, 113, 0.55);
+    color: #f87171;
+}
+
+.toggle.danger:not(:disabled):hover {
+    background: rgba(248, 113, 113, 0.14);
+    border-color: #f87171;
+}
+
+/* ---------- Suche im Ordnerbaum ---------- */
+
+/* Ein Streifen an der linken Kante statt einer Flächenfärbung: die Zeilen
+   tragen bereits einen Anteilsbalken, und zwei Flächen übereinander ließen
+   weder die eine noch die andere lesen. */
+#storage-table tr.storage-hit td:first-child {
+    box-shadow: inset 3px 0 0 var(--notice);
+}
+
+#storage-table tr.storage-hit {
+    background: color-mix(in srgb, var(--notice) 10%, transparent);
+}
+
+#storage-table mark {
+    background: color-mix(in srgb, var(--notice) 34%, transparent);
+    color: var(--text);
+    border-radius: 2px;
+    padding: 0 1px;
 }
 
 /* ---------- Reiter „Programme" ---------- */

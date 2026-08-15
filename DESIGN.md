@@ -126,7 +126,10 @@ ResMon.sln
 │  ├─ Storage/
 │  │  ├─ FolderTree.cs             DirNode, BigFile, Auszug für die Oberfläche
 │  │  ├─ FolderScanner.cs          Ordnerbelegung auf Anforderung (§8.11)
-│  │  └─ StorageFindings.cs        Deutung des Scans: Befund, Beleg, Handgriff (§8.13)
+│  │  ├─ StorageFindings.cs        Deutung des Scans: Befund, Beleg, Handgriff (§8.13)
+│  │  ├─ TempInventory.cs          Temp-Reste gegen die installierten Programme halten (§8.13.2)
+│  │  ├─ TempCleanup.cs            Ausgewählte Temp-Reste löschen — die einzige Löschstelle (§13.5)
+│  │  └─ VolumeMaintenance.cs      Zerstückelung messen, Windows optimieren lassen (§8.14)
 │  ├─ Inventory/
 │  │  ├─ VolumeSpace.cs            Freier Platz je Laufwerk, billig genug für den Takt (§9)
 │  │  ├─ ProgramModel.cs           Programm, Nutzungsquelle, Bericht (§8.13)
@@ -154,6 +157,7 @@ ResMon.sln
    ├─ DetailWindow.xaml(.cs)
    ├─ FolderScanSession.cs         ein Scan-Lauf: Abbruch, Aufgabe, Ergebnis
    ├─ PathActions.cs               Im Explorer zeigen, Pfad oder Befehl kopieren
+   ├─ ShellLauncher.cs             PowerShell öffnen, Befehl hineinschreiben, nicht abschicken (§13.5)
    ├─ TrayIcon.cs
    ├─ AppIcon.cs                   lädt ResMon.ico für den Infobereich
    ├─ ResMon.ico                   Anwendungssymbol, erzeugt (siehe unten)
@@ -758,8 +762,32 @@ Angaben wie ein Startbefund (§8.12), plus eine fünfte:
 | `Bytes` | was dort liegt — nicht zwingend, was frei würde |
 | `Path`, `NodeId` | der Fundort; die Kennung, damit „Im Explorer" den Pfad im **eigenen** Baum nachschlägt statt einen von der Seite gereichten zu übernehmen |
 | `Evidence` | woher die Zahl stammt |
-| `Commands` | der Handgriff als **Folge** von Befehlen, jeder einzeln kopierbar |
+| `Why` | was der Ort ist — auf jedem Rechner dasselbe |
+| `Reason` | **warum der Vorschlag hier steht** — was an der gemessenen Lage ihn ausgelöst hat und wann er nicht zutrifft |
+| `Commands` | der Handgriff als **Folge** von Schritten, je Schritt der Befehl und was er tut |
 | `Caveat` | **was er kostet** |
+| `Action` | Schlüssel einer Erhebung, die dieser Fundort anbietet (nur beim Temp-Ordner, §8.13.2) |
+
+`Why` und `Reason` sind getrennt, weil es zwei verschiedene Aussagen sind. „Hier
+liegen die Rücknahmedaten der MSI-Installationen" beschreibt den Ort; „das steht
+hier, damit die Zahl niemanden in Versuchung führt" begründet den Eintrag. In
+einem Absatz verschmelzen beide zu einer Aufforderung, und der Unterschied
+zwischen *hier liegen 40 GB, die niemand braucht* und *hier liegen 40 GB, die
+gebunden sind* geht verloren — ausgerechnet bei den beiden Regeln, die es nur
+dieses Unterschieds wegen gibt.
+
+Jeder Schritt trägt seine eigene Erklärung (`FindingCommand.Does`) und nicht nur
+seinen Befehlstext. Ein Befehl, den man nicht liest, ist eine Anweisung, der man
+blind folgt — und diese Befehle laufen erhöht und ohne Papierkorb. Wer versteht,
+dass `net stop wuauserv` nur den Dienst anhält, erkennt auch, dass der dritte
+Schritt nicht ausgelassen werden darf. Die Erklärung steht **unter** dem Befehl
+und nicht im Hover: ein Hinweis, den man erst finden muss, wird bei genau der
+Zeile nicht gefunden, bei der es darauf ankommt.
+
+Alle Befehle stehen in **PowerShell-Syntax**. Das ist keine Geschmacksfrage,
+seit sie sich auch in ein PowerShell-Fenster schreiben lassen (§13.5): das
+frühere `del /q /s` war Syntax der Eingabeaufforderung und wäre dort
+fehlgeschlagen. Es ist jetzt `Remove-Item … -Recurse -Force`.
 
 `Commands` ist eine Liste und kein einzelner Befehl, weil die lohnendsten
 Handgriffe mehrschrittig sind — und der erste Schritt allein nichts bringt, ohne
@@ -788,7 +816,113 @@ der Rede wert sind.
 
 **Ausgeführt wird nichts.** Die Begründung aus §13.5 gilt unverändert: die
 Anwendung läuft erhöht, ein Fehlgriff träfe Systemordner ohne Papierkorb und ohne
-Rückgängig. Der Befund legt den Befehl in die Zwischenablage.
+Rückgängig. Der Befund legt den Befehl in die Zwischenablage — oder in ein
+PowerShell-Fenster, in dem er fertig getippt dasteht und auf den Tastendruck des
+Benutzers wartet (§13.5).
+
+### 8.13.2 Verwaiste Temp-Reste
+
+Der Befund zum Temp-Ordner sagt „vieles darin gehört zu Programmen, die längst
+beendet sind". Als Satz richtig, als Auskunft wertlos: er nennt kein einziges.
+Zwei Ergänzungen beheben das.
+
+**Erstens** zählt der Befund die größten Posten namentlich auf, mit Größe —
+gelesen aus dem Baum des Scans, ohne einen weiteren Zugriff auf das Dateisystem.
+Zufallsnamen bleiben dabei außen vor; eine Aufzählung, die zur Hälfte aus
+`{3F2A11C4-…}` besteht, ist unleserlicher als gar keine.
+
+**Zweitens** beantwortet `TempInventory` auf Knopfdruck die Frage, die der
+Ordnerbaum strukturell nicht beantworten kann: *welche dieser Reste gehören zu
+Programmen, die es gar nicht mehr gibt?* Der Gedanke dahinter ist der Kern der
+ganzen Sache — ein Temp-Ordner wird nicht von Windows aufgeräumt, sondern von
+dem Programm, das ihn angelegt hat. Ein deinstalliertes Programm räumt nichts
+mehr auf; sein Aufräumer ist mitdeinstalliert worden. Solche Reste bleiben für
+immer liegen und sind der einzige Teil des Temp-Ordners, bei dem sich **mit
+Begründung** sagen lässt, dass niemand sie je wieder anfasst.
+
+Jeder Posten unmittelbar in `%Temp%` und `%WinDir%\Temp` bekommt eine von fünf
+Einstufungen, jede mit ihrer Begründung im Klartext:
+
+| Einstufung | Bedeutung | löschbar |
+|---|---|---|
+| `Running` | ein laufender Prozess trägt diesen Namen | nein — hier wird gerade gearbeitet |
+| `Installed` | passt zu einem installierten Programm oder zu Windows selbst | nein |
+| `Anonymous` | GUID, `tmpXXXX.tmp`, `MSIc442e.LOG` — der Name verrät nichts | nein |
+| `Recent` | sieht verwaist aus, wurde aber vor weniger als 7 Tagen beschrieben | nein |
+| `Orphan` | keines von allem | **ja** |
+
+Verglichen wird der **Wortkern**: aus `NVIDIA Corporation` wird `nvidia`, aus
+`pip-install-8fk2x` wird `pip`. Gegenüber steht nicht nur der Anzeigename eines
+Programms, sondern auch sein Herausgeber, der Name seines Installationsordners
+und der seiner Hauptanwendung — ein Temp-Ordner kann nach jedem davon heißen,
+und wer nur eine Quelle prüft, hält zwei Drittel aller Reste für verwaist.
+
+Vier Regeln existieren ausschließlich gegen Fehlalarme, jede an einem
+gemessenen Fall der Referenzmaschine belegt:
+
+- **Wortanfänge, die zu Windows gehören** (`diag`, `wpr`, `msi`, `setup`, …).
+  Ohne sie galten `DiagOutputDir` und die 8,1 GB Mitschnitte der eigenen
+  Startaufzeichnung (`WPR_initiated_…`) als verwaist.
+- **Kürzel plus Zufallszahl.** `DEL5795.tmp` beginnt mit drei Buchstaben, die wie
+  ein Programmname aussehen, und landete ohne diese Regel in der Liste mit dem
+  Löschknopf. Höchstens vier Buchstaben, danach nur noch Hex-Zeichen.
+- **Die Wartezeit von 7 Tagen.** Ein Installer, der auf einen Neustart wartet,
+  hat seinen Ordner noch nicht abgeräumt; ein Programm, das gerade installiert
+  wird, steht noch nicht in der Registry.
+- **Die laufenden Prozesse.** Sie fangen den Fall, den die Registry nicht kennt:
+  portable Programme.
+
+Gemessen auf der Referenzmaschine: 48 Posten, 8,5 GB, davon **10 MB in zwei
+Posten** als verwaist eingestuft. Dass die Ausbeute klein ist, ist das Ergebnis
+und kein Mangel — die 8,1 GB darüber gehören zu etwas, das noch existiert.
+
+Die Temp-Ordner **anderer Benutzer** bleiben außen vor, obwohl die Anwendung
+erhöht liefe und hineinkäme: der Abgleich läuft gegen die Programme *dieses*
+Benutzers, und ein anderer hat andere.
+
+### 8.14 Zerstückelung einer Partition
+
+Gemessen wird über `Win32_Volume.DefragAnalysis()` und **nicht** über die Ausgabe
+von `defrag.exe /A`: die Methode liefert 26 Zahlen in benannten Feldern, der
+Befehl liefert übersetzten Fließtext. Dieselbe Überlegung wie bei den
+PDH-Zählernamen (§8.1) — was übersetzt ist, taugt nicht als Schnittstelle. Die
+Methode verlangt erhöhte Rechte und brauchte auf der Referenzmaschine **8,5 s**
+für eine 300-GB-Partition; sie gehört damit auf einen Hintergrund-Thread und
+hinter einen Knopf.
+
+Gemessen auf `C:` (Samsung SSD 980 PRO, 751 129 Dateien):
+
+| Feld | Wert | Bedeutung |
+|---|---|---|
+| `FilePercentFragmentation` | 15 | Anteil zerstückelter Dateien |
+| `TotalFragmentedFiles` | 8 573 | absolut |
+| `AverageFragmentsPerFile` | 1,12 | im Schnitt kaum mehr als ein Stück |
+| `FreeSpacePercentFragmentation` | 94 | der **freie** Platz ist zerstückelt, in 116 003 Lücken |
+| `TotalPercentFragmentation` | 0 | der Gesamtwert, den das Windows-Werkzeug nennt |
+| `MFTPercentInUse` | 100 | Belegung der Master File Table |
+
+Die Auswertung greift acht dieser Felder heraus; die übrigen bleiben in
+`FragmentationReport.Raw` und gibt `ResMon.Probe defrag` vollständig aus. Welche
+Felder die Methode liefert, steht in keiner verlässlichen Quelle — was die
+Auswertung nicht kennt, soll wenigstens sichtbar sein.
+
+**Ausgeführt wird `defrag.exe <Laufwerk> /O /U`.** Der Schalter heißt
+„optimieren" und nicht „defragmentieren", weil Windows je Medium entscheidet: auf
+einer Festplatte ein Defragmentierlauf, auf einer SSD ein Retrim. Ein erzwungenes
+Defragmentieren einer SSD bringt keine Geschwindigkeit — es gibt keine
+Kopfbewegung, die eine zerstückelte Datei teurer machte — und kostet
+Schreibzyklen. Deshalb wird es nicht angeboten, und die Beschriftung der
+Schaltfläche folgt dem Medium (`StorageDevice.HasSeekPenalty`, §8.11).
+
+Aus demselben Grund trägt die Anzeige einen Satz mit, wenn das Medium eine SSD
+ist: sonst liest sich „15 % zerstückelt" als Handlungsbedarf, und das ist es dort
+nicht. Die Prozente beschreiben dann die Buchführung des Dateisystems, nicht die
+Geschwindigkeit.
+
+Die Fortschrittszeilen von `defrag.exe` sind übersetzt und werden **nur
+angezeigt, nie ausgewertet**; maßgeblich ist der Rückgabewert des Prozesses. Der
+Abbruch beendet `defrag.exe` — unbedenklich, weil das Werkzeug in abgeschlossenen
+Schritten arbeitet und kein halbfertiges Dateisystem hinterlässt.
 
 ## 9. Sampling-Takte
 
@@ -911,7 +1045,13 @@ durchlässig. Deshalb gilt:
 | `openFolder` | `scan`, `node` | Im Explorer zeigen |
 | `copyFolderPath` | `scan`, `node` | Pfad in die Zwischenablage |
 | `copyText` | `name` | Beliebigen Text in die Zwischenablage — der Befehl eines Befunds (§8.13.1). Kopiert wird nur; **ausgeführt wird nichts** |
+| `openShell` | `name` | PowerShell-Fenster öffnen, in dem dieser Befehl bereits getippt steht. **Abgeschickt wird er nicht** (§13.5) |
 | `requestPrograms` | — | Programm-Inventar erheben (§8.13) |
+| `requestTemp` | — | Temp-Ordner erheben und gegen die installierten Programme halten (§8.13.2) |
+| `removeTemp` | `items: [0, 3, …]` | Ausgewählte Temp-Reste löschen — **nach Rückfrage des Hosts**. Indizes in die zuletzt gesendete Erhebung, **nie Pfade** |
+| `analyzeVolume` | `path: "C:\\"` | Zerstückelung messen (§8.14). Wie beim Scan **nur Laufwerkswurzeln** |
+| `optimizeVolume` | `path: "C:\\"` | Optimierungslauf starten — **nach Rückfrage des Hosts** (§8.14) |
+| `cancelOptimize` | — | Laufenden Optimierungslauf abbrechen |
 | `requestStartup` | — | Startanalyse erheben (§8.12) |
 | `bootTrace` | `key: arm\|cancel\|stop\|forget` | Startaufzeichnung schalten |
 | `analyzeTrace` | `key: windows\|own` | Eine Aufzeichnung auswerten |
@@ -946,9 +1086,26 @@ Ein Command zum Beenden von Prozessen ist bewusst nicht enthalten.
 Normales WPF-Fenster mit WebView2. Tabelle in HTML; Sortierung, Filterung,
 Gruppierung und Aggregation laufen vollständig in JavaScript.
 
-Acht Reiter: **Prozesse**, **Energie**, **Verbindungen**, **System**,
-**Speicher**, **System-Start**, **Logs**, **Einstellungen**. Die Kacheln über den
-Reitern gelten für alle.
+Neun Reiter: **Prozesse**, **Energie**, **Verbindungen**, **System**,
+**Speicher**, **Programme**, **System-Start** — und abgesetzt am rechten Rand
+**Logs** und **Einstellungen**. Die Kacheln über den Reitern gelten für alle.
+
+Die beiden rechten sind keine Datenblätter wie die Reihe davor: der eine zeigt,
+was die Anwendung an sich selbst bemerkt hat, der andere stellt sie ein. Der
+Zwischenraum trägt diese Aussage — ein weiterer Reiter in der Reihe ließe sie
+untergehen.
+
+**Jeder Reiter erklärt sich im Hover.** Die Namen allein tun das nicht:
+„System" und „Speicher" klingen nach demselben, und dass unter „Programme" das
+Deinstallieren steckt und nicht die laufenden Anwendungen, ist von außen nicht zu
+sehen. Der Text nennt deshalb die Frage, die der Reiter beantwortet, was darin
+zu tun ist, und wann man ihn braucht. Dasselbe gilt für die Stellen, an denen
+zwei ähnlich klingende Begriffe auseinandergehalten werden müssen — beim Knopf
+„Optimieren" etwa steht im Hover, was **auf diesem Medium** tatsächlich läuft:
+auf einer Festplatte ein Defragmentierlauf, der Bruchstücke wieder
+hintereinanderschiebt, auf einer SSD ein Retrim, der dem Datenträger die freien
+Blöcke meldet. Der Text wird beim Messen nachgezogen, weil vorher weder das
+Medium noch feststeht, ob überhaupt etwas zu tun wäre.
 
 **Spaltenbreiten** sind in allen Tabellen an der rechten Kante der
 Spaltenüberschrift ziehbar, Doppelklick setzt eine Spalte zurück. Solange nichts
@@ -1129,6 +1286,52 @@ und die Differenz zu der Belegung, die Windows meldet. Einzelne Ordner tragen ei
 Zeichen für nicht lesbar, Abzweigung, komprimiert oder Cloud. Ohne diese Angaben
 wären die Zahlen darüber falsch zu lesen.
 
+**Suche.** Ein Feld in der Leiste hebt jede Zeile hervor, in deren Namen der Text
+vorkommt — Streifen an der linken Kante, getönter Zeilenhintergrund, und das
+Vorkommen selbst in `<mark>`. Die Kachelkarte zieht dieselben Treffer nach, dort
+als Rahmen und nicht als Füllung: die Fläche einer Kachel *ist* ihre Größe, die
+darf eine Suche nicht überdecken.
+
+Der Rahmen ist **doppelt und farblos**: außen ein Band in fast Schwarz, innen
+eines in reinem Weiß, je zwei Pixel nebeneinander. Eine einzelne Farbe kann es
+nicht leisten — die Karte trägt die ganze Palette in mehreren Helligkeiten
+nebeneinander, und was auf der einen Kachel heraussticht, verschwindet auf der
+nächsten. Das galt für die frühere Hinweisfarbe und gälte für jede andere, die
+man stattdessen wählte; ein Paar aus Schwarz und Weiß hängt dagegen nicht am
+Farbton, sondern am Kontrast, und einer der beiden Ringe liegt immer an. Die
+beiden Bänder liegen **nebeneinander und nicht übereinander**: mit demselben
+Rechteck und verschiedenen Strichstärken deckte der schmalere den breiteren in
+der Mitte ab, und vom unteren bliebe je ein Pixel übrig.
+
+Zu Anfang **blinken** die Treffer 1,5 Sekunden lang, indem die beiden Ringe ihre
+Rollen tauschen — eine Bewegung, bei der kein Bildpunkt Fläche hinzukommt oder
+wegfällt. Das Blinken beantwortet „wo ist es hin", der stehenbleibende Rahmen
+danach „wo ist es". Ein Blinken, das nicht aufhört, wäre das Gegenteil einer
+Hilfe: die Karte ist zum Hinsehen da, und niemand liest neben etwas, das zuckt.
+Neu gezeichnet wird nur beim Phasenwechsel alle 190 ms und nicht Bild für Bild —
+ein vollständiger Aufbau der Karte kostet zu viel, um ihn sechzigmal in der
+Sekunde zu machen, und für ein Blinken bringt er nichts. Kacheln unter 12 Pixel
+haben für einen Rahmen kein Inneres mehr; dort ist die volle Fläche die Marke.
+
+Die Vorfahren der Treffer werden aufgeklappt, sonst bliebe ein Treffer in einem
+zugeklappten Ordner unsichtbar und die Suche sähe aus wie „nichts gefunden". Ab
+200 Treffern unterbleibt das Aufklappen — „doc" trifft halbe Partitionen —, und
+die Statuszeile sagt das. Gesucht wird in dem, was die Seite hat: im Auszug des
+Scans und in allem, was nachgeladen wurde. Für die Frage „wo steckt Docker"
+genügt das, denn was klein genug war, aus dem Auszug zu fallen, erklärt auch
+keine volle Partition.
+
+**Zustand des Datenträgers.** Eine zweite Leiste misst die Zerstückelung (§8.14)
+und stößt an, was Windows für dieses Medium vorsieht. Beides betrifft den
+Datenträger und nicht den Ordnerbaum darunter, deshalb steht es getrennt.
+
+Der Optimierungslauf ist der zweite Eingriff der Anwendung nach dem Beenden eines
+Prozesses, und er folgt demselben Muster: Rückfrage vor dem Start, und der Dialog
+benennt, was auf *diesem* Medium tatsächlich läuft. Das steht nicht im
+Widerspruch zum Absatz unten — dort geht es um das **Löschen**, das unumkehrbar
+wäre. Ein Optimierungslauf verschiebt Daten, verliert keine und lässt sich
+jederzeit abbrechen.
+
 Kontextmenü auf Zeile und Kachel: **Im Explorer öffnen** und **Pfad kopieren**.
 Gelöscht wird bewusst nicht aus der Anwendung heraus — sie läuft erhöht (§14), ein
 Fehlgriff träfe also auch Systemordner, ohne Papierkorb und ohne Rückgängig. Der
@@ -1138,18 +1341,61 @@ Bei schmalem **und** flachem Fenster weicht die Karte: untereinander blieben ihr
 rund 70 Pixel, darin ist keine Fläche mehr mit einer anderen zu vergleichen.
 
 **Unter Baum und Karte stehen die Befunde** (§8.13.1) — dieselbe Kartenform wie
-im Reiter System-Start: Schwere, Menge, was es ist, der Handgriff als
-kopierbarer Befehl und darunter in der Hinweisfarbe, was er kostet. Sie beziehen
-sich auf denselben Lauf und reisen mit dessen Antwort; ein eigener Knopf wäre
-eine zweite Gelegenheit, beide auseinanderlaufen zu lassen.
+im Reiter System-Start: Schwere, Menge, was es ist, warum der Vorschlag hier
+steht, der Handgriff Schritt für Schritt und darunter in der Hinweisfarbe, was er
+kostet. Sie beziehen sich auf denselben Lauf und reisen mit dessen Antwort; ein
+eigener Knopf wäre eine zweite Gelegenheit, beide auseinanderlaufen zu lassen.
 
 Das Panel nimmt sich höchstens 38 % der Höhe und scrollt dann in sich. Baum und
 Karte sind der Hauptzweck des Reiters und sollen von einer langen Befundliste
 nicht zusammengedrückt werden. Der Schalter „Auch Hinweise zeigen" blendet die
 Posten ein, bei denen ausdrücklich nichts zu tun ist.
 
-Der Absatz oben zum Nichtlöschen bleibt unberührt: die Befunde nennen den
-Handgriff, ausgelöst wird er außerhalb.
+**Je Befehl zwei Knöpfe: „Kopieren" und „In PowerShell öffnen".** Der zweite ist
+der Mittelweg zwischen zwei Enden, die beide falsch wären. Den Befehl selbst
+auszuführen verbietet sich aus dem Grund im Absatz oben. Ihn nur zu kopieren
+verlangt drei Handgriffe, bei denen erfahrungsgemäß etwas schiefgeht: Fenster
+öffnen, einfügen, und dabei nicht das falsche Fenster erwischen. Hier steht der
+Befehl am Ende sichtbar in einer Eingabezeile; wer ihn abschickt, ist der
+Benutzer, und er sieht vorher genau, was er abschickt. Derselbe Umgang wie beim
+Beenden eines Prozesses: der Eingriff bleibt beim Benutzer, die Anwendung nimmt
+ihm die Fehlerquellen ab.
+
+Technisch hängt sich `ShellLauncher` mit `AttachConsole` an die Konsole des
+gestarteten Prozesses und legt die Zeichen über `WriteConsoleInput` als
+Tastenereignisse in dessen Eingabepuffer. Der heikle Teil ist der **Zeitpunkt**,
+nicht das Schreiben: zu früh geschrieben, verwirft PowerShell den Puffer beim
+Hochfahren. Deshalb wird nicht geraten und gewartet, sondern verabredet — der
+Host legt ein benanntes Ereignis an, das gestartete PowerShell setzt es als
+letzten Schritt vor der ersten Eingabeaufforderung, und erst danach wird
+geschrieben. Ein `VK_RETURN` ist ausdrücklich nicht dabei. Das ist doppelt
+abgesichert: die Eingabezeile von PowerShell bindet Sondertasten über den
+Tastencode und nicht über das Zeichen, ein verirrter Wagenrücklauf würde also
+eingefügt statt ausgeführt. Nachgemessen: mit Tastencode 0 bleibt der Befehl
+stehen, erst mit `VK_RETURN` läuft er los. Vor allem anderen geht der Befehl in
+die Zwischenablage — schlägt das Schreiben fehl, steht der Benutzer nicht vor
+einem leeren Fenster.
+
+**Verwaiste Temp-Reste** (§8.13.2) erscheinen in einem eigenen Panel darunter,
+auf Knopfdruck aus dem Temp-Befund heraus. Es ist die **einzige Liste dieser
+Anwendung, an deren Ende gelöscht wird**, und entsprechend umständlich mit
+Absicht: erst erheben, dann jeden Posten einzeln ankreuzen, dann eine Rückfrage
+des Hosts, die Zahl, Menge und die drei größten Posten beim Namen nennt.
+Ankreuzen lässt sich nur, was als verwaist eingestuft ist; die übrigen lassen
+sich einblenden, stehen aber gesperrt und gedämpft da — sie belegen, dass die
+Zuordnung stattgefunden hat, statt sie behaupten zu lassen.
+
+Das widerspricht dem Absatz oben zum Nichtlöschen nicht, sondern grenzt ihn ein.
+Dort geht es um den **Ordnerbaum**: darin kann jeder Pfad stehen, auch
+`C:\Windows\System32`. Hier ist die Menge des Löschbaren von vornherein
+eingegrenzt, und die Eingrenzung wird bei jedem einzelnen Posten erneut geprüft —
+der Pfad muss **unmittelbar** in einem der beiden Temp-Ordner liegen, geprüft
+über das übergeordnete Verzeichnis und nicht über einen Präfixvergleich, weil
+`StartsWith` ein `..` im Pfad beliebig weit hinausführen ließe. Gelöscht wird
+endgültig und nicht in den Papierkorb: Zweck des Ganzen ist, Platz frei zu
+machen, und ein Papierkorb gäbe genau ihn nicht her. Was sich nicht löschen ließ,
+steht danach einzeln mit Grund da — „3 Posten ließen sich nicht löschen"
+beantwortete die einzige Frage nicht, die dann noch offen ist.
 
 ### 13.6 Programme
 
@@ -1248,6 +1494,24 @@ Grund. Drei Quellen speisen ihn:
 Das Protokoll geht nur mit der Nutzlast raus, wenn sich sein Zähler geändert hat
 — es steht die meiste Zeit still. Ein Kontrollkästchen blendet zusätzlich alles
 ein, was einwandfrei liefert, als Gegenprobe.
+
+**Die Hinweisleiste oben** lässt sich unter Einstellungen ganz abschalten. Sie
+ist die Kurzfassung derselben Flags und steht über jedem Reiter; wer weiß, dass
+auf diesem Rechner die Prozessortemperatur nun einmal einen Kernel-Treiber
+bräuchte, will das nicht in jeder Sitzung wieder lesen. Abgeschaltet fehlt nur
+die Anzeige — die Werte, auf die sich eine Meldung bezieht, bleiben dieselben und
+stehen dann eben unerklärt leer; die vollständige Fassung steht weiter in diesem
+Reiter. Der Schalter unterscheidet sich vom Wegklicken einer einzelnen Meldung:
+er gilt für alle und auch für die, die erst noch kommen, und gehört deshalb in
+die Einstellungen und nicht an die Leiste.
+
+Er ist der einzige Schalter der Einstellungsseite, der **nicht über den Host**
+läuft, sondern im `localStorage` der Seite steht. Die Leiste gehört dem
+Detailfenster allein, das Overlay kennt sie nicht — genau wie die weggeklickten
+Meldungen, die schon dort liegen. Zwei Ablagen für dieselbe Sache wären eine zu
+viel. Abgeschaltet wird die Leiste **geleert und nicht versteckt**: sonst hinge
+sie beim Wiedereinschalten mit dem Stand von vorhin da, bis der nächste
+Messpunkt eintrifft.
 
 ## 14. Rechte, Autostart, Konfiguration
 
