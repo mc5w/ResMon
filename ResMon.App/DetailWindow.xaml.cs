@@ -967,6 +967,17 @@ public partial class DetailWindow : Window
             case "setChartRow" when command.On is { } on:
                 return SetChart(_settings.Chart, command.Key, on);
 
+            /* Die Grenze für die Startaufzeichnung. 0 schaltet sie ab; nach oben
+               begrenzt sie sich selbst, weil eine Grenze jenseits der
+               Datenträgergröße keine mehr ist. Nach unten 128 MB: darunter
+               bräche sie eine ganz gewöhnliche Aufzeichnung mitten im Start ab
+               und machte die Funktion unbrauchbar. */
+            case "setBootTraceLimit" when command.Value is { } limit:
+                _settings.BootTraceLimitMb = limit <= 0
+                    ? 0
+                    : (int)Math.Clamp(limit, 128, 32768);
+                return true;
+
             default:
                 return false;
         }

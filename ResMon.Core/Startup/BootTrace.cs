@@ -35,8 +35,19 @@ public sealed record BootTraceStatus(BootTraceState State, string Message)
 
     public long? SizeBytes { get; init; }
 
+    /// <summary>
+    /// Was eine <em>laufende</em> Aufzeichnung bisher geschrieben hat. Nicht zu
+    /// verwechseln mit <see cref="SizeBytes"/>: das ist die fertige Datei, dies
+    /// hier die Menge, die gerade anwächst — und die in keinem Verzeichnis steht
+    /// (siehe <see cref="BootTraceSession"/>).
+    /// </summary>
+    public long? RecordingBytes { get; init; }
+
     /// <summary>Fehlertext des letzten Aufrufs, falls einer scheiterte.</summary>
     public string? Error { get; init; }
+
+    /// <summary>Ob gerade auf den Datenträger geschrieben wird.</summary>
+    public bool IsWriting => State == BootTraceState.Recording && RecordingBytes > 0;
 }
 
 /// <summary>
@@ -117,17 +128,72 @@ public static class BootTrace
         // die über den Schnellstart hinweg weiterläuft (DESIGN.md §8.9).
         bool rebooted = Inventory.BootHistory.Read().PowerOn is { } powerOn && powerOn > armed;
 
-        return rebooted
-            ? new BootTraceStatus(BootTraceState.Recording,
-                "Der Neustart ist erfolgt, die Aufzeichnung läuft. Jetzt beenden, um die Spur zu sichern.")
+        // Die laufende Menge wird auch dann gelesen, wenn der Merkzettel
+        // „scharfgestellt“ sagt: existiert die Sitzung bereits, läuft sie —
+        // und dann ist der Merkzettel es, der sich irrt.
+        TraceVolume volume = BootTraceSession.Read();
+
+        if (rebooted || volume.Running)
+        {
+            return new BootTraceStatus(BootTraceState.Recording,
+                volume.Running
+                    ? $"Der Neustart ist erfolgt, die Aufzeichnung läuft — sie hat bereits "
+                      + $"{Megabytes(volume.Bytes)} geschrieben und schreibt weiter, bis sie "
+                      + "beendet oder abgebrochen wird."
+                    : "Der Neustart ist erfolgt, die Aufzeichnung läuft. Jetzt beenden, um die Spur zu sichern.")
             {
                 ArmedAt = armed,
-            }
-            : new BootTraceStatus(BootTraceState.Armed,
-                "Scharfgestellt. Die Aufzeichnung beginnt beim nächsten Neustart.")
-            {
-                ArmedAt = armed,
+                RecordingBytes = volume.Running ? volume.Bytes : null,
             };
+        }
+
+        return new BootTraceStatus(BootTraceState.Armed,
+            "Scharfgestellt. Die Aufzeichnung beginnt beim nächsten Neustart.")
+        {
+            ArmedAt = armed,
+        };
+    }
+
+    private static string Megabytes(long bytes) => bytes >= 1073741824
+        ? $"{bytes / 1073741824.0:N1} GB"
+        : $"{bytes / 1048576.0:N0} MB";
+
+    /// <summary>
+    /// Bricht eine laufende Aufzeichnung ab, sobald sie die eingestellte Grenze
+    /// überschreitet. Gibt zurück, ob eingegriffen wurde.
+    /// </summary>
+    /// <remarks>
+    /// Der Notausschalter. Er gehört in den Takt der Anwendung und nicht ins
+    /// Detailfenster: die Aufzeichnung läuft weiter, wenn das Fenster zu ist, und
+    /// gerade dann bemerkt sie niemand.
+    /// <para>
+    /// Abgebrochen und nicht beendet: <c>-stopboot</c> schriebe die gesammelten
+    /// Puffer erst noch in eine Datei zusammen, und die wäre so groß wie das
+    /// Problem. Wer eine Aufzeichnung dieser Größe verpasst hat, will sie nicht
+    /// auch noch auf der Platte haben.
+    /// </para>
+    /// </remarks>
+    public static bool EnforceLimit(int limitMb)
+    {
+        if (limitMb <= 0)
+            return false;
+
+        TraceVolume volume = BootTraceSession.Read();
+        long limit = (long)limitMb * 1024 * 1024;
+
+        if (!volume.Running || volume.Bytes <= limit)
+            return false;
+
+        Cancel();
+
+        DiagnosticLog.Report(
+            "Startaufzeichnung",
+            $"Die Startaufzeichnung wurde bei {Megabytes(volume.Bytes)} abgebrochen — die "
+            + $"eingestellte Grenze liegt bei {limitMb} MB. Sie schreibt fortlaufend weiter, "
+            + "solange sie läuft, und wäre sonst bis zum vollen Datenträger gewachsen. Die "
+            + "Grenze steht unter Einstellungen.");
+
+        return true;
     }
 
     /// <summary>Richtet den Autologger für den nächsten Start ein.</summary>

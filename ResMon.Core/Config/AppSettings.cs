@@ -77,6 +77,27 @@ public sealed class AppSettings
 
     public bool Autostart { get; set; }
 
+    /// <summary>
+    /// Obergrenze für eine laufende Startaufzeichnung in Megabyte. Ist sie
+    /// überschritten, bricht die Anwendung die Aufzeichnung ab und schreibt es
+    /// ins Protokoll. <c>0</c> schaltet die Grenze ab.
+    /// </summary>
+    /// <remarks>
+    /// Der Standardwert ist großzügig und trotzdem harmlos: eine Startanalyse
+    /// wird je nach Startdauer 100 bis 500 MB groß, 2 GB lassen also reichlich
+    /// Luft für einen langsamen Rechner. Die Grenze ist nicht dafür da, knapp zu
+    /// sein — sie ist dafür da, dass aus einer vergessenen Aufzeichnung nicht
+    /// eine volle Festplatte wird.
+    /// <para>
+    /// Auf der Referenzmaschine war genau das passiert: eine im Dateimodus
+    /// scharfgestellte Aufzeichnung lief nach dem Start unbemerkt weiter, schrieb
+    /// mit rund 12 MB/s und hatte nach wenigen Stunden 87 GB belegt. Der Windows
+    /// Performance Recorder kennt für seine Befehlszeile keinen Schalter dafür;
+    /// die Grenze muss deshalb von hier kommen.
+    /// </para>
+    /// </remarks>
+    public int BootTraceLimitMb { get; set; } = 2048;
+
     [JsonIgnore]
     public static string DefaultPath { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),

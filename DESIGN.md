@@ -143,7 +143,8 @@ ResMon.sln
 │  │  ├─ BootChain.cs              Gemessene Startkette aus Shell-Core
 │  │  ├─ BootPerformanceReader.cs  Windows' eigene Startmessung
 │  │  ├─ StartupFindings.cs        Die bekannten Muster und ihre Belege
-│  │  ├─ BootTrace.cs              ETW-Aufzeichnung scharfstellen und einsammeln
+│  │  ├─ BootTrace.cs              ETW-Aufzeichnung scharfstellen, einsammeln, begrenzen
+│  │  ├─ BootTraceSession.cs       Wie viel eine laufende Aufzeichnung schreibt (ControlTrace)
 │  │  ├─ BootTraceAnalyzer.cs      ETL auswerten: CPU und E/A je Prozess
 │  │  └─ StartupAnalyzer.cs        Klammer um alles, auf Anforderung
 │  ├─ Native/
@@ -675,6 +676,49 @@ Die Anwendung stellt scharf, sagt es, und **wartet**. Sie startet den Rechner
 nicht selbst neu — ein Monitor, der den Rechner neu startet, ist ein Monitor, den
 man nicht laufen lassen kann.
 
+#### Die Aufzeichnung hört nicht von selbst auf
+
+`-addboot … -filemode` richtet einen Autologger ein, der beim Hochfahren
+anspringt — und **weiterläuft, bis jemand ihn beendet**. Nicht bis der Start
+vorbei ist; es gibt kein solches Ereignis. Auf der Referenzmaschine lief eine
+vergessene Aufzeichnung nach dem Neustart weiter, schrieb mit rund **12 MB/s**
+und hatte nach wenigen Stunden **87 GB** belegt. Der freie Platz fiel von 96 GB
+auf 57 GB, während im Ordnerbaum nichts wuchs.
+
+Das ist der Fall, an dem der Scan grundsätzlich versagt: die `.etl` steht im
+Verzeichnis mit **0 Byte**, weil ETW ihre Größe erst beim Beenden einträgt. Der
+Scan meldete 164,7 GB im Baum bei 223,7 GB belegt — 87 GB dieser Differenz waren
+genau diese eine unsichtbare Datei. Aufräumen im Baum konnte dagegen nichts
+ausrichten, weil dort nichts zu sehen war.
+
+Drei Vorkehrungen, aus diesem Vorfall entstanden:
+
+1. **Eine Höchstgrenze**, die die Anwendung selbst durchsetzt
+   (`BootTrace.EnforceLimit`, aufgerufen im 30-Sekunden-Takt des Collectors).
+   Der Windows Performance Recorder kennt in seiner Befehlszeile **keinen**
+   Schalter dafür — `wpr -help start` listet nur `-filemode` und
+   `-recordtempto` —, also muss die Grenze von hier kommen. Voreinstellung
+   2 GB gegenüber den üblichen 100 bis 500 MB einer Startanalyse; `0` schaltet
+   sie ab. Sie hängt am Collector und nicht am Detailfenster, weil die
+   Aufzeichnung weiterschreibt, wenn das Fenster zu ist — und gerade dann
+   bemerkt sie niemand. Abgebrochen wird mit `-cancelboot` und nicht mit
+   `-stopboot`: letzteres schriebe die gesammelten Puffer erst noch in eine
+   Datei zusammen, und die wäre so groß wie das Problem.
+2. **Ein Befund im Reiter Speicher** (§13.5), sobald eine Aufzeichnung läuft.
+   Der einzige Befund, der nicht aus dem Ordnerbaum stammt — er kann es nicht,
+   siehe oben.
+3. **Die laufende Menge im Reiter System-Start**, in Warnfarbe. Vorher stand
+   dort nur, dass die Aufzeichnung läuft; dass sie dabei fortlaufend schreibt,
+   stand nirgends.
+
+Gemessen wird die Menge über `ControlTrace` mit `EVENT_TRACE_CONTROL_QUERY`
+(`Startup/BootTraceSession.cs`): `BuffersWritten` mal `BufferSize`. Felder statt
+Textausgabe — dieselbe Überlegung wie bei den PDH-Zählernamen (§8.1). `logman
+query -ets` nennt dieselben Zahlen, aber hinter übersetzten Beschriftungen
+(„Geschriebene Puffer"), und was übersetzt ist, taugt nicht als Schnittstelle.
+Gegengeprüft an Sitzungen von Windows selbst: NtfsLog 8 KB × 167 Puffer,
+DiagTrack-Listener 64 KB × 4445 Puffer.
+
 Die Rechenzeit aus einer solchen Spur ist eine **Schätzung aus Abtastungen**,
 keine Messung: der Kernel unterbricht in festem Takt und notiert, welcher Thread
 gerade läuft. Bei der üblichen Millisekunde je Abtastung und Kern entspricht eine
@@ -813,6 +857,60 @@ von 16,3 GiB entspricht genau der Größe von WinSxS.
 Ein Befund ohne Menge steht vor allen anderen: dass die Partition zu 95 % belegt
 ist, gewinnt kein einziges Byte und entscheidet trotzdem, ob die Zahlen darunter
 der Rede wert sind.
+
+**Ein Befund richtet sich nach der Hardware.** Die Ruhezustandsdatei ist auf
+einem Notebook etwas anderes als auf einem Standrechner, und zwar nicht
+graduell: dort ist sie die Funktion, für die man das Gerät zuklappt, hier liegt
+sie für einen Fall bereit, der nie eintritt. Deshalb fragt die Regel über
+`GetSystemPowerStatus` nach einem Akku und liefert zwei verschiedene Befunde.
+
+| | Notebook | Standrechner, volle Datei | Standrechner, schon verkleinert |
+|---|---|---|---|
+| Einstufung | `Hint` | nach Menge | `Hint` |
+| Handgriff | **keiner** | `powercfg /h /type reduced` | **keiner** |
+| Aussage | warum die Datei zu Recht so groß ist | wie sie halbiert wird, ohne den Schnellstart zu verlieren | dass hier nichts mehr zu holen ist |
+
+Auf dem Notebook wäre eine Einstufung nach Menge irreführend: über einem Posten,
+zu dem der richtige Rat „stehen lassen“ lautet, stünde „schwer“. Der Eintrag
+erscheint dort trotzdem, weil er sonst als großer unerklärter Block in der Karte
+läge — und genau das führt in Versuchung.
+
+Auf dem Standrechner ist `/type reduced` und nicht `/h off` der Vorschlag: es
+halbiert die Datei und lässt den **Schnellstart** stehen, der an derselben Datei
+hängt und nur einen Bruchteil davon braucht. Gemessen auf der Referenzmaschine
+(32 GB RAM, kein Akku): 13.712.896.000 → 6.856.445.952 Bytes, und `powercfg /a`
+führt den Schnellstart weiter auf. `/h off` steht nur noch im Vorbehalt.
+
+Fehlt die Auskunft über den Akku, gilt der Rechner als Standrechner — die
+Annahme, unter der ein Vorschlag zu viel entsteht und keiner zu wenig.
+
+**Ein Vorschlag, der schon befolgt ist, ist schlimmer als keiner** — er lässt den
+Leser an der ganzen Liste zweifeln, und zwar zu Recht. Ob die Datei bereits
+verkleinert ist, wird deshalb am Verhältnis zum Arbeitsspeicher gemessen: die
+volle Form belegt 40 %, die verkleinerte 20 %, und eine Schwelle bei 30 % kann
+zwischen beiden nicht danebengreifen. Der Registry-Wert `HiberFileType` wäre der
+direktere Weg und ist verworfen — seine Belegung ist nicht dokumentiert, und sie
+an einem einzigen Gerät abzulesen hieße, sie zu raten. Das Verhältnis ist
+dagegen nachrechenbar. Der Eintrag verschwindet dabei nicht: 6 GiB bleiben ein
+sichtbarer Block in der Karte, und ein unerklärter Block ist genau der, den
+jemand von Hand anfasst.
+
+**Wo sich der Zustand nicht messen lässt, fragt der erste Schritt.** Beim
+Komponentenspeicher ist von außen nicht zu erkennen, ob überhaupt etwas
+freizumachen wäre — das hängt daran, wie viele Updates seit dem letzten Lauf
+abgelöst wurden, und steht in keiner Ordnergröße. Der Handgriff ist deshalb
+zweistufig wie beim virtuellen Datenträger: `AnalyzeComponentStore` ist eine
+Frage und kein Eingriff, `StartComponentCleanup` folgt nur, wenn Windows selbst
+dazu rät. Damit ist der Befund auch dann ehrlich, wenn er — wie es hier immer
+der Fall ist — bei jedem Scan erneut erscheint.
+
+**Kein Befund empfiehlt etwas, das Platz kostet.** Der Reiter beantwortet die
+Frage, wo Platz liegt; ein Befehl, der den Komponentenspeicher *repariert*,
+schreibt fehlende Dateien nach und macht ihn größer. Er gehört deshalb nicht in
+diese Liste, auch nicht als Vorstufe zu einem Befehl, der anschließend aufräumt.
+Der Vorbehalt beim Komponentenspeicher benennt den Abbruch mit Fehler 6701 und
+sagt, was er bedeutet — dass es eine Frage der Reparatur ist und wo sie
+nachzulesen wäre —, ohne einen Befehl dafür anzubieten.
 
 **Ausgeführt wird nichts.** Die Begründung aus §13.5 gilt unverändert: die
 Anwendung läuft erhöht, ein Fehlgriff träfe Systemordner ohne Papierkorb und ohne
@@ -1054,6 +1152,7 @@ durchlässig. Deshalb gilt:
 | `cancelOptimize` | — | Laufenden Optimierungslauf abbrechen |
 | `requestStartup` | — | Startanalyse erheben (§8.12) |
 | `bootTrace` | `key: arm\|cancel\|stop\|forget` | Startaufzeichnung schalten |
+| `setBootTraceLimit` | `value` (MB) | Höchstgrenze für eine laufende Aufzeichnung; `0` schaltet sie ab |
 | `analyzeTrace` | `key: windows\|own` | Eine Aufzeichnung auswerten |
 | `openTrace` | — | Die eigene Aufzeichnung im Explorer zeigen |
 | `requestHandles` | — | Handles aller Prozesse zählen |
@@ -1346,10 +1445,31 @@ steht, der Handgriff Schritt für Schritt und darunter in der Hinweisfarbe, was 
 kostet. Sie beziehen sich auf denselben Lauf und reisen mit dessen Antwort; ein
 eigener Knopf wäre eine zweite Gelegenheit, beide auseinanderlaufen zu lassen.
 
-Das Panel nimmt sich höchstens 38 % der Höhe und scrollt dann in sich. Baum und
-Karte sind der Hauptzweck des Reiters und sollen von einer langen Befundliste
-nicht zusammengedrückt werden. Der Schalter „Auch Hinweise zeigen" blendet die
+Das Panel nimmt sich höchstens 38 % der Höhe und scrollt dann in sich, das der
+Temp-Reste höchstens 34 %. Der Schalter „Auch Hinweise zeigen" blendet die
 Posten ein, bei denen ausdrücklich nichts zu tun ist.
+
+**Baum und Karte haben eine Untergrenze von 260 px**, und der Reiter scrollt als
+Ganzes, wenn die Summe nicht mehr passt. Ohne beides verteilte er den Mangel,
+indem er der Karte ihre Höhe wegnahm — bei zwei offenen Panels auf einem Fenster
+in halber Bildschirmbreite bis auf **null**. Die Karte war dann nicht klein,
+sondern fort, und weil das Canvas seine zuletzt gemessene Pixelhöhe behielt,
+ragte es über die Befunde darunter hinweg. Lieber eine Bildlaufleiste als ein
+Reiter, dessen Hauptinhalt lautlos verschwindet.
+
+Das Canvas steht dabei **außerhalb des Flusses** (`position: absolute`), und das
+ist keine Kosmetik: `drawTreemap` misst die Hülle und schreibt dem Canvas die
+gemessene Höhe fest in den Stil. Im Fluss spannte diese feste Höhe die Hülle von
+innen wieder auf — die Hülle könnte nicht mehr schrumpfen, der `ResizeObserver`
+bekäme nie eine Änderung zu sehen, und die Karte bliebe auf der Höhe von vorhin
+stehen. Außerhalb des Flusses trägt das Canvas nichts zur Größe seiner Hülle bei,
+und die Messung bleibt eine Einbahnstraße. `overflow: hidden` auf der Hülle fängt
+zusätzlich ab, was zwischen zwei Messungen zu groß sein könnte.
+
+Aus demselben Grund werden die **Befunde vor der Karte gezeichnet**: das Panel
+war bis dahin ausgeblendet, und sobald es erscheint, bleibt der Karte weniger
+Höhe. Zeichnete sie zuerst, zöge der `ResizeObserver` sie zwar nach — aber erst
+nach einem sichtbaren Bild in falscher Größe.
 
 **Je Befehl zwei Knöpfe: „Kopieren" und „In PowerShell öffnen".** Der zweite ist
 der Mittelweg zwischen zwei Enden, die beide falsch wären. Den Befehl selbst

@@ -58,7 +58,7 @@ Das Detailfenster hat neun Reiter:
 | **Programme** | Was installiert ist, wie groß es wirklich ist und wann es zuletzt lief |
 | **System-Start** | Woran der Systemstart hängt: Phasen, gemessene Startkette, Befunde mit Fundstelle, Autostart-Einträge, Wartekette |
 | **Logs** | Was gerade *nicht* ausgelesen werden kann und warum — Zählersätze, Sensortreiber, gefangene Fehler |
-| **Einstellungen** | Farbschema, Deckkraft und Größe des Overlays, sichtbare Zeilen, Reihen des Diagramms, Hinweisleiste an oder aus |
+| **Einstellungen** | Farbschema, Deckkraft und Größe des Overlays, sichtbare Zeilen, Reihen des Diagramms, Hinweisleiste an oder aus, Höchstgrenze der Startaufzeichnung |
 
 „Logs" und „Einstellungen" sitzen abgesetzt am rechten Rand: sie sind keine
 Datenblätter wie die Reihe davor, sondern zeigen, was die Anwendung an sich
@@ -102,6 +102,41 @@ kompaktiert. Zwei Regeln existieren allein des Vorbehalts wegen:
 Löschkandidat und sind keiner. Bei WinSxS kommt hinzu, dass die gemessene Zahl
 gar nicht stimmt — der größte Teil sind harte Verknüpfungen auf Dateien in
 System32, die hier ein zweites Mal zählen.
+
+**Ein Befund kommt nicht aus dem Ordnerbaum**, und das ist bei ihm der Punkt:
+läuft eine Startaufzeichnung, steht sie ganz oben mit der Menge, die sie bereits
+geschrieben hat. Ein Scan kann sie nicht finden — die `.etl`-Datei steht im
+Verzeichnis mit 0 Byte, weil ETW ihre Größe erst beim Beenden einträgt. Wenn der
+freie Platz schrumpft, ohne dass im Baum etwas wächst, ist fast immer das die
+Erklärung. Auf der Referenzmaschine waren so unbemerkt 87 GB zusammengekommen,
+mit rund 12 MB/s. Gegen eine Wiederholung steht eine Höchstgrenze unter
+Einstellungen (Vorgabe 2 GB), bei deren Überschreiten ResMon die Aufzeichnung
+abbricht und es im Reiter Logs vermerkt.
+
+Ein Befund richtet sich nach der Hardware: die **Ruhezustandsdatei** ist auf
+einem Notebook etwas anderes als auf einem Standrechner. Gibt es einen Akku,
+steht dort kein Handgriff, sondern die Erklärung, warum die Datei zu Recht so
+groß ist — sie ist die Funktion, für die man das Gerät zuklappt. Ohne Akku wird
+`powercfg /h /type reduced` vorgeschlagen: das halbiert sie und lässt den
+Schnellstart stehen, der an derselben Datei hängt. Auf der Referenzmaschine
+(32 GB RAM, kein Akku) waren das 13,7 → 6,9 GB, Schnellstart weiterhin
+verfügbar.
+
+Ist der Handgriff schon getan, verschwindet er: die Ruhezustandsdatei wird gegen
+den Arbeitsspeicher gehalten (volle Form 40 %, verkleinerte 20 %), und bei einer
+bereits verkleinerten steht kein Befehl mehr da. Ein Vorschlag, den man längst
+befolgt hat, ist schlimmer als keiner — er lässt an der ganzen Liste zweifeln.
+
+Wo sich das nicht messen lässt, **fragt der erste Schritt**. Beim
+Komponentenspeicher ist von außen nicht zu erkennen, ob etwas freizumachen wäre;
+deshalb steht dort `AnalyzeComponentStore` als Frage vor dem eigentlichen
+Aufräumbefehl — dieselbe Form wie beim virtuellen Datenträger, wo `docker system
+df` zuerst kommt.
+
+Kein Befund empfiehlt etwas, das Platz *kostet*. Ein Reparaturlauf für den
+Komponentenspeicher etwa schreibt fehlende Dateien nach und macht ihn größer —
+er gehört deshalb nicht in einen Reiter, der die Frage beantwortet, wo Platz
+liegt, auch nicht als Vorstufe zum Aufräumen.
 
 Ausgeführt wird auch hier nichts. Neben jedem Befehl stehen zwei Knöpfe:
 **Kopieren** legt ihn in die Zwischenablage, **In PowerShell öffnen** startet ein

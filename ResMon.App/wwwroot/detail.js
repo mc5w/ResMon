@@ -3083,6 +3083,8 @@ const settingsUi = {
     scaleValue: document.getElementById('scale-value'),
     clickThrough: document.getElementById('set-clickthrough'),
     notices: document.getElementById('set-notices'),
+    bootLimit: document.getElementById('set-boot-limit'),
+    bootLimitValue: document.getElementById('boot-limit-value'),
     overlayRows: document.getElementById('overlay-rows'),
     chartRows: document.getElementById('chart-rows'),
 };
@@ -3150,6 +3152,9 @@ function applySettings(data) {
     settingsUi.scaleValue.textContent = percent(data.overlay.scale);
     settingsUi.clickThrough.checked = data.overlay.clickThrough;
 
+    setInput(settingsUi.bootLimit, data.bootTraceLimitMb ?? 2048);
+    settingsUi.bootLimitValue.textContent = bootLimitText(data.bootTraceLimitMb ?? 2048);
+
     for (const row of OVERLAY_ROWS) {
         document.getElementById(`row-${row.key}`).checked = Boolean(data.visible[row.key]);
     }
@@ -3182,6 +3187,21 @@ settingsUi.scale.addEventListener('input', event => {
 
 settingsUi.clickThrough.addEventListener('change', event =>
     send('setClickThrough', { on: event.target.checked }));
+
+/* Ganz links steht „aus" und nicht „0 MB": eine Grenze von null Megabyte wäre
+   als Zahl gelesen die schärfste überhaupt, gemeint ist das Gegenteil. */
+function bootLimitText(mb) {
+    if (!mb) {
+        return 'aus';
+    }
+    return mb >= 1024 ? `${(mb / 1024).toFixed(1).replace('.', ',')} GB` : `${mb} MB`;
+}
+
+settingsUi.bootLimit.addEventListener('input', event => {
+    const value = Number(event.target.value);
+    settingsUi.bootLimitValue.textContent = bootLimitText(value);
+    send('setBootTraceLimit', { value });
+});
 
 // ---------- Ansichten ----------
 
@@ -4287,12 +4307,17 @@ function renderScan(data) {
     renderStorageNote();
     renderStorageHead();
 
+    /* Die Befunde vor der Karte: das Panel war bis eben ausgeblendet, und sobald
+       es erscheint, bleibt der Karte weniger Höhe. Zeichnete sie zuerst, würde
+       sie auf die Höhe von vorher vermessen — der ResizeObserver zöge sie zwar
+       nach, aber erst nach einem sichtbaren Bild in falscher Größe. */
+    renderStorageFindings();
+
     // Nach einem neuen Lauf sind die alten Trefferkennungen wertlos: sie zeigen
     // in den Baum von vorhin. Der Suchtext bleibt stehen und wird neu angewandt.
     applyStorageSearch();
 
     renderCrumbs();
-    renderStorageFindings();
 }
 
 /**
@@ -5262,6 +5287,28 @@ function renderTrace() {
         parts.push(hint);
     }
 
+    /* Die laufende Menge, so laut wie es geht. Bis hierher stand an dieser
+       Stelle nur, dass die Aufzeichnung läuft — nicht, dass sie dabei
+       fortlaufend auf den Datenträger schreibt und nicht von selbst aufhört.
+       Auf der Referenzmaschine waren daraus unbemerkt 87 GB geworden. */
+    if (trace.state === 'recording' && trace.recordingBytes) {
+        const live = document.createElement('p');
+        live.className = 'trace-live';
+        live.textContent =
+            `Diese Aufzeichnung schreibt gerade: bereits ${formatBytes(trace.recordingBytes)} `
+            + 'auf dem Datenträger. Sie hört nicht von selbst auf — auch dann nicht, wenn der '
+            + 'Start längst vorbei ist.';
+        parts.push(live);
+
+        const advice = document.createElement('p');
+        advice.className = 'warning';
+        advice.textContent =
+            'Zum Auswerten „beenden und sichern" — dabei wird die gesammelte Menge in eine Datei '
+            + 'dieser Größe geschrieben. Geht es nur darum, den Platz zurückzubekommen, ist '
+            + '„verwerfen" das Richtige: das schreibt nichts.';
+        parts.push(advice);
+    }
+
     if (trace.state === 'recorded' && trace.sizeBytes) {
         const file = document.createElement('p');
         file.className = 'warning';
@@ -5279,8 +5326,11 @@ function renderTrace() {
         actions.append(traceButton('Doch nicht — zurücknehmen', 'cancel'));
     } else if (trace.state === 'recording') {
         actions.append(traceButton('Aufzeichnung beenden und sichern', 'stop',
-            'Hält den Autologger an und schreibt die Spur. Das kann eine Minute dauern.'));
-        actions.append(traceButton('Verwerfen', 'cancel'));
+            'Hält den Autologger an und schreibt die gesammelten Puffer in eine Datei — die '
+            + 'wird so groß wie die oben genannte Menge. Das kann eine Minute dauern.'));
+        actions.append(traceButton('Verwerfen', 'cancel',
+            'Bricht die Aufzeichnung ab und schreibt nichts. Der belegte Platz wird sofort '
+            + 'frei. Das Richtige, wenn es um den Datenträger geht und nicht um die Auswertung.'));
     } else if (trace.state === 'recorded') {
         const reveal = document.createElement('button');
         reveal.type = 'button';

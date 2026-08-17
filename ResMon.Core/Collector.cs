@@ -378,6 +378,18 @@ public sealed class Collector : IDisposable
             // Beides ist zu langsam für den Prozess-Takt und ändert sich selten;
             // der 30-Sekunden-Takt trägt sie gemeinsam.
             _faults.Refresh();
+
+            /* Der Notausschalter für eine vergessene Startaufzeichnung. Er hängt
+               hier und nicht am Detailfenster, weil die Aufzeichnung
+               weiterschreibt, wenn das Fenster zu ist — und gerade dann bemerkt
+               sie niemand.
+
+               Der 30-Sekunden-Takt genügt: bei den gemessenen 12 MB/s sind das
+               360 MB Spielraum über der Grenze, gegenüber einem Wachstum, das
+               ohne diese Prüfung erst am vollen Datenträger endet. Die Abfrage
+               selbst kostet nichts, wenn keine Sitzung läuft — dann gibt es die
+               Sitzung schlicht nicht. */
+            Startup.BootTrace.EnforceLimit(_settings.BootTraceLimitMb);
         }
         finally
         {

@@ -436,6 +436,7 @@ public static class WebBridge
                 net = settings.Chart.Net,
                 disk = settings.Chart.Disk,
             },
+            bootTraceLimitMb = settings.BootTraceLimitMb,
         };
 
         return JsonSerializer.Serialize(payload, Options);
@@ -647,6 +648,10 @@ public static class WebBridge
                 armedAt = trace.ArmedAt,
                 path = trace.TracePath,
                 sizeBytes = trace.SizeBytes,
+
+                // Die Menge, die gerade anwächst — nicht die der fertigen Datei.
+                // Sie steht in keinem Verzeichnis (BootTraceSession).
+                recordingBytes = trace.RecordingBytes,
                 error = trace.Error,
                 warning = BootTrace.Warning,
             },

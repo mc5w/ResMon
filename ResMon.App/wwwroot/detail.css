@@ -1705,12 +1705,31 @@ td.conn-none {
    Arbeit, die Karte den Blick. Beide Spalten bekommen minmax(0, 1fr), sonst
    drückte ein langer Pfad in der Namensspalte die Karte aus dem Fenster. */
 
+/* Reicht die Höhe für Karte, Befunde und Temp-Reste zusammen nicht mehr, scrollt
+   der Reiter als Ganzes. Vorher verteilte er den Mangel, indem er der Karte ihre
+   Höhe wegnahm, bis nichts mehr übrig war — ein Fenster auf der halben
+   Bildschirmbreite genügte dafür. Lieber eine Bildlaufleiste als ein Reiter,
+   dessen Hauptinhalt lautlos verschwindet. */
+#view-storage {
+    overflow-y: auto;
+}
+
 .storage-split {
     flex: 1;
-    min-height: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 10px;
+
+    /* Baum und Karte sind der Zweck dieses Reiters und dürfen nicht
+       verschwinden, weil darunter Panels aufgehen. Mit `min-height: 0` taten sie
+       genau das: Befunde und Temp-Reste nahmen zusammen den größten Teil der
+       Höhe, und der Anteil, der übrig blieb, fiel auf null — gemessen bei 1200 ×
+       1000. Die Karte war dann nicht klein, sondern fort.
+
+       Der Wert ist die Untergrenze, ab der eine Kachelkarte noch etwas aussagt.
+       Darunter ist keine Fläche mehr mit einer anderen zu vergleichen, und
+       genau dafür ist sie da. */
+    min-height: 260px;
 }
 
 .storage-tree {
@@ -1730,6 +1749,12 @@ td.conn-none {
 
 .storage-map {
     min-width: 0;
+
+    /* Als Rasterzelle sonst `min-height: auto` — die Zelle ließe sich dann nicht
+       unter ihren Inhalt verkleinern, und der Inhalt ist ein Canvas mit fester
+       Pixelhöhe. */
+    min-height: 0;
+
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -1743,9 +1768,24 @@ td.conn-none {
     position: relative;
     flex: 1;
     min-height: 0;
+
+    /* Fängt ab, was das Canvas zwischen zwei Messungen zu groß sein könnte —
+       etwa im Bild, bevor der ResizeObserver zum Zug kommt. Ohne das malte es
+       für einen Moment über die Befunde darunter. */
+    overflow: hidden;
 }
 
+/* Absolut und nicht im Fluss. Das ist der Punkt, an dem sonst ein Kreis
+   entsteht: `drawTreemap` misst die Hülle und schreibt dem Canvas die gemessene
+   Höhe fest in den Stil. Stünde es im Fluss, spannte diese feste Höhe die Hülle
+   von innen wieder auf — die Hülle könnte nicht mehr schrumpfen, der
+   ResizeObserver bekäme nie eine Änderung zu sehen, und beim Erscheinen der
+   Befundliste ragte die Karte über sie hinweg. Außerhalb des Flusses trägt das
+   Canvas nichts zur Größe seiner Hülle bei, und die Messung bleibt eine
+   Einbahnstraße. */
 #storage-canvas {
+    position: absolute;
+    inset: 0;
     display: block;
     width: 100%;
     height: 100%;
@@ -2316,16 +2356,27 @@ td.conn-none {
     line-height: 1.55;
     margin-top: 5px;
     max-width: 96ch;
+
+    /* Absätze im Vorbehalt bleiben Absätze. Ein Vorbehalt, der mehrere Dinge
+       auseinanderhält — was der Befehl kostet, was nicht geht, was stattdessen
+       ginge —, ist als eine Textwand das Erste, was niemand zu Ende liest.
+       `pre-line` und nicht `pre`: die Zeilenumbrüche der Quelltextliterale
+       sollen weiter umbrechen dürfen, nur die gesetzten Absätze zählen. */
+    white-space: pre-line;
 }
 
 /* ---------- Verwaiste Temp-Reste ---------- */
 
 /* Dieselbe Höhenschranke wie bei den Befunden und aus demselben Grund: Baum und
    Karte sind der Zweck des Reiters und sollen von keiner Liste darunter
-   zusammengedrückt werden. */
+   zusammengedrückt werden.
+
+   Anfangs standen hier 46 %. Zusammen mit den 38 % der Befunde blieb dem Baum
+   und der Karte damit nichts — beide Panels können gleichzeitig offen sein, und
+   diese Summe hatte ich nicht bedacht. */
 .storage-temp-panel {
     flex: 0 1 auto;
-    max-height: 46%;
+    max-height: 34%;
     overflow-y: auto;
 }
 
@@ -2731,6 +2782,19 @@ td.conn-none {
 .trace-body .warning {
     max-width: 92ch;
     margin-bottom: 9px;
+}
+
+/* Die einzige Zeile dieses Reiters, die etwas meldet, das gerade jetzt
+   passiert und Platz kostet. Sie trägt deshalb die Warnfarbe und einen Balken
+   an der Kante — die übrigen Absätze hier sind Erklärungen, dieser ist ein
+   Hinweis auf einen laufenden Vorgang. */
+.trace-body .trace-live {
+    color: #f87171;
+    font-weight: 600;
+    max-width: 92ch;
+    margin-bottom: 9px;
+    padding-left: 9px;
+    border-left: 3px solid #f87171;
 }
 
 .trace-body .error {

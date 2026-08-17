@@ -554,6 +554,17 @@
             </section>
 
             <section class="info-card">
+                <h4>Startaufzeichnung</h4>
+
+                <label class="field">
+                    <span>Höchstgrenze <b id="boot-limit-value">–</b></span>
+                    <input id="set-boot-limit" type="range" min="0" max="8192" step="256">
+                </label>
+                <p class="field-hint">Eine Startaufzeichnung endet <b>nicht</b> von selbst, wenn der Start vorbei ist — sie schreibt weiter, bis jemand sie beendet oder abbricht. Der Windows Performance Recorder kennt dafür keinen eigenen Schalter, deshalb überwacht ResMon die Menge selbst und bricht ab, sobald diese Grenze überschritten ist. Der Abbruch steht danach im Reiter Logs.</p>
+                <p class="field-hint">Eine gewöhnliche Startanalyse wird 100 bis 500 MB groß; der Standardwert von 2 GB lässt also reichlich Luft. Ganz links steht <b>aus</b> — dann wächst eine vergessene Aufzeichnung wieder bis zum vollen Datenträger.</p>
+            </section>
+
+            <section class="info-card">
                 <h4>Verlaufsdiagramm</h4>
                 <div class="check-grid" id="chart-rows"></div>
                 <p class="field-hint">Prozentwerte teilen sich die Achse von 0 bis 100 %. Netzwerk und Datenträger haben keine Obergrenze und werden als Fläche hinter den Linien gezeichnet, skaliert auf ihren höchsten Wert der letzten fünf Minuten; der steht in der Legende.</p>

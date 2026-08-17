@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using ResMon.Core.Native;
 using ResMon.Core.Startup;
 
 namespace ResMon.Core.Storage;
@@ -134,6 +135,13 @@ public static class StorageFindings
     /// <summary>Ab dieser Belegung gilt eine Partition als eng.</summary>
     private const double TightShare = 0.90;
 
+    /// <summary>
+    /// Bis zu diesem Anteil am Arbeitsspeicher gilt die Ruhezustandsdatei als
+    /// bereits verkleinert. Genau zwischen den beiden Größen, die Windows
+    /// vergibt — 40 % für die volle, 20 % für die verkleinerte.
+    /// </summary>
+    private const double ReducedCeiling = 0.30;
+
     /// <summary>Eine andere Partition muss so viel mehr frei haben, um als Ziel zu taugen.</summary>
     private const long MoveTargetHeadroom = 32L * 1024 * 1024 * 1024;
 
@@ -145,6 +153,7 @@ public static class StorageFindings
         var findings = new List<StorageFinding>();
 
         AddVolumePressure(findings, scan);
+        AddRunningBootTrace(findings);
         AddHibernation(findings, scan);
         AddComponentStore(findings, scan);
         AddUpdateCache(findings, scan);
@@ -236,41 +245,216 @@ public static class StorageFindings
     }
 
     /// <summary>
-    /// Die Ruhezustandsdatei. Einer der wenigen Posten, bei denen ein einziger
-    /// Befehl die volle Menge freigibt — und bei dem der Vorbehalt ebenso klar ist.
+    /// Eine laufende Startaufzeichnung — der einzige Befund, der <b>nicht</b> aus
+    /// dem Ordnerbaum stammt.
     /// </summary>
+    /// <remarks>
+    /// Er muss es auch nicht, denn hier versagt der Baum grundsätzlich: die
+    /// <c>.etl</c>-Datei einer laufenden Aufzeichnung steht im Verzeichnis mit
+    /// <b>0 Byte</b>, weil ETW ihre Größe erst beim Beenden einträgt. Ein Scan
+    /// kann noch so gründlich sein — er findet nichts, während der Platz
+    /// verschwindet. Auf der Referenzmaschine meldete der Scan 164,7 GB im Baum
+    /// bei 223,7 GB belegt, und 87 GB dieser Differenz waren genau diese eine
+    /// unsichtbare Datei.
+    /// <para>
+    /// Deshalb steht dieser Befund ganz oben und ohne Rücksicht auf Schwellen:
+    /// er beantwortet die Frage „warum wird der Platz weniger, obwohl ich
+    /// aufräume“, und keine Ordnersumme kann das.
+    /// </para>
+    /// </remarks>
+    private static void AddRunningBootTrace(List<StorageFinding> findings)
+    {
+        TraceVolume volume = BootTraceSession.Read();
+        if (!volume.Running)
+            return;
+
+        findings.Add(new StorageFinding(
+            FindingSeverity.High,
+            $"Eine Startaufzeichnung läuft und hat {Mib(volume.Bytes)} geschrieben",
+            "Der Windows Performance Recorder zeichnet auf, was Kernel, Treiber und Programme " +
+            "tun. Die Aufzeichnung beginnt beim Hochfahren und hört nicht von selbst wieder " +
+            "auf — sie schreibt fortlaufend weiter, bis jemand sie beendet oder abbricht, auch " +
+            "Stunden nach dem Start.")
+        {
+            Bytes = volume.Bytes,
+            Evidence = "ControlTrace: geschriebene Puffer mal Puffergröße",
+            Reason = "Dieser Befund kommt nicht aus dem Ordnerbaum, sondern aus der " +
+                     "Aufzeichnungssitzung selbst — und das ist der Punkt. Die Datei, in die " +
+                     "geschrieben wird, steht im Verzeichnis mit 0 Byte da, weil ihre Größe " +
+                     "erst beim Beenden eingetragen wird. Kein Scan kann sie finden. Wenn der " +
+                     "freie Platz schrumpft, ohne dass im Baum etwas wächst, ist fast immer " +
+                     "das hier die Erklärung.",
+            Commands =
+            [
+                new("wpr -cancelboot",
+                    "Bricht die Aufzeichnung ab und verwirft sie. Der belegte Platz wird sofort " +
+                    "frei. Braucht erhöhte Rechte."),
+            ],
+            Caveat = "Nicht „wpr -stopboot“ nehmen, wenn es nur um den Platz geht: das beendet " +
+                     "die Aufzeichnung zwar auch, schreibt aber vorher alle gesammelten Puffer " +
+                     "in eine Datei zusammen — und die ist so groß wie die Menge oben. Auf einem " +
+                     "engen Datenträger ist das der Schritt, der ihn vollends füllt. " +
+                     "„-stopboot“ ist richtig, wenn die Aufzeichnung ausgewertet werden soll, " +
+                     "und nur dann.\n\n" +
+                     "Damit das nicht wieder unbemerkt läuft, bricht ResMon eine Aufzeichnung " +
+                     "ab, sobald sie die unter Einstellungen eingetragene Grenze überschreitet.",
+        });
+    }
+
+    /// <summary>
+    /// Die Ruhezustandsdatei — der einzige Befund, der auf einem Notebook etwas
+    /// anderes rät als auf einem Standrechner.
+    /// </summary>
+    /// <remarks>
+    /// Der Unterschied ist nicht kosmetisch, sondern der ganze Punkt. Auf einem
+    /// Notebook ist der Ruhezustand die Funktion, für die man das Gerät zuklappt:
+    /// er bezahlt seinen Platz. Auf einem Rechner ohne Akku wird er praktisch nie
+    /// benutzt — dort hält vor allem der Schnellstart die Datei am Leben, und der
+    /// braucht nur einen Bruchteil davon.
+    /// <para>
+    /// Deshalb steht auf dem Standrechner <c>/type reduced</c> als Handgriff und
+    /// nicht <c>/h off</c>: es halbiert die Datei und lässt den Schnellstart
+    /// stehen. Auf dem Notebook steht überhaupt kein Handgriff — der Eintrag
+    /// erklärt dort nur, warum die Datei so groß ist, damit sie in der Karte
+    /// nicht unerklärt bleibt und niemand auf eigene Faust darauf losgeht.
+    /// </para>
+    /// <para>
+    /// Ob ein Akku vorhanden ist, sagt <c>GetSystemPowerStatus</c> — dieselbe
+    /// Quelle, aus der auch der Energie-Reiter seine Angaben zieht, und auf jedem
+    /// Gerät verfügbar. Fehlt die Auskunft, gilt der Rechner als Standrechner;
+    /// das ist die Annahme, unter der ein Vorschlag zu viel entsteht und keiner
+    /// zu wenig.
+    /// </para>
+    /// </remarks>
     private static void AddHibernation(List<StorageFinding> findings, FolderScanResult scan)
     {
         string path = Path.Combine(scan.Root, "hiberfil.sys");
         if (Locate(scan, path) is not { } spot || spot.Bytes < SmallThreshold)
             return;
 
-        findings.Add(new StorageFinding(
-            Weigh(spot.Bytes),
-            "Ruhezustandsdatei belegt Platz in Höhe eines Teils des Arbeitsspeichers",
+        bool portable = PowerStatus.Read().HasBattery;
+
+        /* Ob die Datei schon verkleinert ist. Gemessen am Verhältnis zum
+           Arbeitsspeicher und nicht an der Registry: Windows legt die volle Datei
+           mit 40 % des RAM an und die verkleinerte mit 20 %, und dieser Abstand
+           ist so groß, dass eine Schwelle in der Mitte nicht danebengreifen kann.
+
+           Der Registry-Wert `HiberFileType` wäre der direktere Weg und wurde
+           verworfen — seine Belegung ist nicht dokumentiert, und die Zuordnung
+           an einem einzigen Gerät abzulesen hieße, sie zu raten. Das Verhältnis
+           ist nachrechenbar: 32 GiB RAM, volle Datei 13.712.896.000 Bytes,
+           verkleinerte 6.856.445.952 Bytes — genau die Hälfte. */
+        long ram = SystemMemory.Read().TotalBytes;
+        bool alreadyReduced = ram > 0 && spot.Bytes < (long)(ram * ReducedCeiling);
+
+        const string what =
             "In diese Datei schreibt Windows den Arbeitsspeicher, wenn der Rechner in den " +
             "Ruhezustand geht. Ihre Größe richtet sich nach dem verbauten RAM, nicht nach " +
-            "der Benutzung — sie schrumpft von allein nie.")
+            "der Benutzung — sie schrumpft von allein nie. Am Schnellstart hängt sie " +
+            "ebenfalls: der schreibt beim Herunterfahren die Kernel-Sitzung hinein, damit " +
+            "der nächste Start schneller geht.";
+
+        // Der Satz, der auf beiden Geräten gilt und der die häufigste Fehlannahme
+        // ausräumt: die Datei ist nicht das Ergebnis der Funktion, sie ist die
+        // Funktion.
+        const string preallocated =
+            "Die Datei lässt sich nicht von Hand löschen und danach der Ruhezustand wieder " +
+            "einschalten: sie ist die Funktion. Beim Einschlafen fährt das System herunter " +
+            "— da ist keine Gelegenheit mehr, Platz zu suchen und womöglich keinen zu " +
+            "finden. Deshalb wird er im Voraus belegt, und beim Wiedereinschalten steht die " +
+            "Datei sofort wieder in voller Größe da. Entweder der Platz ist frei oder der " +
+            "Ruhezustand verfügbar.";
+
+        /* Schon verkleinert: dann steht hier kein Handgriff mehr, denn der
+           einzige verbliebene wäre das vollständige Abschalten — und das nimmt
+           den Schnellstart mit. Der Eintrag verschwindet trotzdem nicht: 6 GiB
+           bleiben ein sichtbarer Block in der Karte, und ein Posten, der ohne
+           Erklärung dasteht, ist genau der, den jemand von Hand anfasst.
+
+           Ein Vorschlag, der schon befolgt ist, ist schlimmer als keiner: er
+           lässt den Leser an der Liste zweifeln, und zwar zu Recht. */
+        if (alreadyReduced && !portable)
         {
-            Bytes = spot.Bytes,
-            Path = path,
-            NodeId = spot.Id,
-            Evidence = "Großdatei im Wurzelverzeichnis",
-            Reason = $"Vorgeschlagen, weil diese eine Datei {Gib(spot.Bytes)} GiB belegt und der " +
-                     "Befehl sie vollständig entfernt — einer der wenigen Handgriffe, bei denen " +
-                     "der Gewinn genau der angezeigten Zahl entspricht und nichts davon später " +
-                     "wieder anwächst. Er passt nicht, wenn dieser Rechner den Ruhezustand " +
-                     "tatsächlich benutzt: bei einem Notebook, das man zuklappt, ist das die Regel.",
-            Commands =
-            [
-                new("powercfg /h off",
-                    "Schaltet den Ruhezustand ab. Windows löscht daraufhin hiberfil.sys — die " +
-                    "Datei lässt sich nicht von Hand löschen, das System hält sie offen."),
-            ],
-            Caveat = "Danach gibt es keinen Ruhezustand mehr, und der Schnellstart von Windows " +
-                     "entfällt ebenfalls — der Rechner startet dadurch spürbar langsamer. " +
-                     "Rückgängig mit „powercfg /h on“.",
-        });
+            findings.Add(new StorageFinding(
+                FindingSeverity.Hint,
+                "Ruhezustandsdatei — bereits auf die kleine Form gesetzt",
+                what)
+            {
+                Bytes = spot.Bytes,
+                Path = path,
+                NodeId = spot.Id,
+                Evidence = $"Großdatei im Wurzelverzeichnis, {spot.Bytes * 100 / Math.Max(1, ram)} % "
+                           + "des Arbeitsspeichers — die volle Form belegt 40 %",
+                Reason = "Hier steht kein Vorschlag mehr: die Datei ist bereits die verkleinerte "
+                         + "Form, die nur noch die Kernel-Sitzung für den Schnellstart fasst. "
+                         + "Mehr ist nicht zu holen, ohne den Schnellstart aufzugeben. Der Posten "
+                         + "steht nur da, damit der Block in der Karte nicht unerklärt bleibt.",
+                Caveat = preallocated + "\n\n"
+                         + "Wer auch den Schnellstart nicht braucht, wird mit „powercfg /h off“ "
+                         + "den Rest los — der Rechner startet danach spürbar langsamer. "
+                         + "Rückgängig mit „powercfg /h on“, zurück zur vollen Form mit "
+                         + "„powercfg /h /type full“.",
+            });
+
+            return;
+        }
+
+        findings.Add(portable
+            ? new StorageFinding(
+                // Auf einem Notebook ist das eine Auskunft und keine Aufgabe. Mit
+                // der Einstufung nach Menge stünde hier „schwer“ über einem Posten,
+                // zu dem der richtige Rat „stehen lassen“ lautet.
+                FindingSeverity.Hint,
+                "Ruhezustandsdatei — auf einem Notebook zu Recht so groß",
+                what)
+            {
+                Bytes = spot.Bytes,
+                Path = path,
+                NodeId = spot.Id,
+                Evidence = "Großdatei im Wurzelverzeichnis, Akku laut GetSystemPowerStatus vorhanden",
+                Reason = $"Hier steht kein Vorschlag. Dieses Gerät hat einen Akku, und damit ist " +
+                         $"der Ruhezustand die Funktion, für die man es zuklappt — die " +
+                         $"{Gib(spot.Bytes)} GiB sind der Preis dafür und nicht verschwendet. " +
+                         "Der Posten steht nur da, weil er in der Karte sonst als großer " +
+                         "unerklärter Block aufliefe und genau das in Versuchung führt.",
+                Caveat = preallocated + "\n\n" +
+                         "Wer den Ruhezustand hier wirklich nicht braucht, kommt mit " +
+                         "„powercfg /h /type reduced“ auf etwa die halbe Größe und behält den " +
+                         "Schnellstart — verliert aber genau das Zuklappen. Ganz abschalten " +
+                         "würde „powercfg /h off“; dann ist auch der Schnellstart fort. Auf " +
+                         "einem Notebook ist beides selten ein guter Tausch.",
+            }
+            : new StorageFinding(
+                Weigh(spot.Bytes),
+                "Ruhezustandsdatei belegt Platz in Höhe eines Teils des Arbeitsspeichers",
+                what)
+            {
+                Bytes = spot.Bytes,
+                Path = path,
+                NodeId = spot.Id,
+                Evidence = "Großdatei im Wurzelverzeichnis, kein Akku laut GetSystemPowerStatus",
+                Reason = $"Vorgeschlagen, weil dieser Rechner keinen Akku hat: der Ruhezustand " +
+                         $"ist hier praktisch nie im Einsatz, und die {Gib(spot.Bytes)} GiB " +
+                         "liegen für einen Fall bereit, der nicht eintritt. Der Befehl unten " +
+                         "greift deshalb den Schnellstart nicht an — der bleibt und braucht nur " +
+                         "einen Bruchteil des Platzes.",
+                Commands =
+                [
+                    new("powercfg /h /type reduced",
+                        "Verkleinert die Datei auf etwa die Hälfte: sie fasst danach nur noch " +
+                        "die Kernel-Sitzung für den Schnellstart statt des gesamten " +
+                        "Arbeitsspeichers. Der Schnellstart bleibt, der volle Ruhezustand " +
+                        "entfällt. Zurück mit „powercfg /h /type full“."),
+                ],
+                Caveat = "Danach lässt sich der Rechner nicht mehr in den Ruhezustand versetzen. " +
+                         "Auf einem Standrechner fällt das selten auf; wer ihn benutzt, um " +
+                         "eine offene Sitzung über Nacht zu retten, merkt es sofort.\n\n" +
+                         preallocated + "\n\n" +
+                         "Radikaler wäre „powercfg /h off“: das entfernt die Datei ganz und " +
+                         "gibt den vollen Betrag frei — nimmt aber den Schnellstart mit, und " +
+                         "der Rechner startet spürbar langsamer. Rückgängig mit " +
+                         "„powercfg /h on“.",
+            });
     }
 
     /// <summary>
@@ -296,25 +480,37 @@ public static class StorageFindings
             Path = path,
             NodeId = spot.Id,
             Evidence = "Ordnersumme des Scans, logische Größe (README „Abweichungen“)",
-            Reason = "Vorgeschlagen, weil dieser Ordner in der Liste weit oben steht und die " +
-                     "naheliegende Reaktion darauf — hineingehen und aufräumen — den Rechner " +
-                     "unbrauchbar macht. Der Befehl ist der einzige unterstützte Weg, hier " +
-                     "etwas zu entfernen. Wie viel dabei herauskommt, steht vorher nicht fest: " +
-                     "auf einem frisch aufgesetzten System nichts, auf einem, das mehrere " +
-                     "Funktionsupdates hinter sich hat, mehrere Gigabyte.",
+            Reason = "Dieser Eintrag verschwindet nie, denn der Ordner ist immer groß — auch " +
+                     "unmittelbar nach einem Aufräumlauf. Er steht hier vor allem, weil die " +
+                     "naheliegende Reaktion auf seine Größe — hineingehen und löschen — den " +
+                     "Rechner unbrauchbar macht.\n\n" +
+                     "Ob überhaupt etwas zu holen ist, kann von außen niemand sagen: das " +
+                     "hängt daran, wie viele Updates seit dem letzten Lauf abgelöst wurden, " +
+                     "und steht in keiner Ordnergröße. Deshalb ist der erste Schritt unten " +
+                     "eine Frage und kein Eingriff — sagt er „nicht empfohlen“, ist der zweite " +
+                     "überflüssig und man lässt es.",
             Commands =
             [
+                new("DISM /Online /Cleanup-Image /AnalyzeComponentStore",
+                    "Zeigt nur an, nichts wird verändert: wie groß der Komponentenspeicher " +
+                    "tatsächlich ist, wie viel davon abgelöste Versionen sind und ob Windows " +
+                    "selbst zu einem Aufräumlauf rät. Die Zeile „Bereinigung des " +
+                    "Komponentenspeichers empfohlen“ ist die Antwort. Dauert ein bis zwei " +
+                    "Minuten."),
                 new("DISM /Online /Cleanup-Image /StartComponentCleanup",
-                    "Entfernt die abgelösten Versionen der Windows-Bausteine — also die, die " +
-                    "ein Update ersetzt hat und die nur noch zum Zurücknehmen dagestanden " +
-                    "haben. Läuft je nach Rechner einige Minuten und gibt zwischendurch " +
-                    "keinen Fortschritt aus."),
+                    "Nur nötig, wenn der erste Schritt dazu rät. Entfernt die abgelösten " +
+                    "Versionen der Windows-Bausteine — also die, die ein Update ersetzt hat " +
+                    "und die nur noch zum Zurücknehmen dagestanden haben. Läuft je nach " +
+                    "Rechner einige Minuten und gibt zwischendurch keinen Fortschritt aus."),
             ],
             Caveat = "Bricht der Lauf mit Fehler 6701 ab („Transaktion nicht mehr aktiv“), ist " +
                      "nichts kaputtgegangen: die Transaktion wird zurückgenommen, der Ordner " +
-                     "bleibt wie er war. Meist hilft ein Neustart und ein zweiter Versuch — " +
-                     "gemächlicher geht es über die Aufgabe „StartComponentCleanup“ unter " +
-                     "Microsoft\\Windows\\Servicing, die Windows selbst dafür mitbringt. " +
+                     "bleibt wie er war. Ein zweiter Versuch scheitert dann aber an derselben " +
+                     "Stelle — der Abbruch bedeutet meist, dass der Komponentenspeicher " +
+                     "beschädigt ist. Das ist eine Frage der Reparatur und nicht des " +
+                     "Aufräumens; ein Reparaturlauf schreibt fehlende Dateien nach und macht " +
+                     "die Sache also erst einmal größer, nicht kleiner. Was genau schiefging, " +
+                     "steht in %WinDir%\\Logs\\CBS\\CBS.log.\n\n" +
                      "Diesen Ordner niemals von Hand leeren — Windows lässt sich danach nicht " +
                      "mehr aktualisieren und teilweise nicht mehr starten. Der Befehl entfernt " +
                      "nur die abgelösten Versionen; mit „/ResetBase“ zusätzlich die " +
